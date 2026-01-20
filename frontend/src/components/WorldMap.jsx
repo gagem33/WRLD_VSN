@@ -5,7 +5,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { TrendingUp, TrendingDown, AlertCircle, Activity } from 'lucide-react';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
-const MAPBOX_TOKEN = process.env.REACT_APP_MAPBOX_TOKEN;
+const MAPBOX_TOKEN = "pk.eyJ1IjoiZ2FnZW0zMyIsImEiOiJjbWtteDVxNDIwazUxM2ZxOXBwNjZzZ3k3In0.nZQO34oBZux2ZPpCS7wwnA";
+const API_URL = "https://wrldvsn.up.railway.app";
 
 const WorldMap = () => {
   const [viewport, setViewport] = useState({
