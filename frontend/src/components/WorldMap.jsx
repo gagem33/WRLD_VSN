@@ -1,88 +1,75 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import Map from 'react-map-gl';
-import { DeckGL, HeatmapLayer, IconLayer } from 'deck.gl';
+import React, { useEffect, useState, useCallback } from "react";
+import "mapbox-gl/dist/mapbox-gl.css";
+import Map, { Marker } from "react-map-gl";
+import DeckGL, { HeatmapLayer, IconLayer } from "deck.gl";
 
-const MAPBOX_TOKEN = "your-mapbox-token-here"; // Replace with your actual key
-const API_URL = "https://wrldvsn.up.railway.app"; // Hardcoded for now
+const MAPBOX_TOKEN = "YOUR_REAL_MAPBOX_TOKEN"; // Paste your Mapbox token here
+const API_URL = "https://wrldvsn.up.railway.app"; // Your Railway backend
 
 const WorldMap = () => {
   const [viewport, setViewport] = useState({
-    longitude: 0,
     latitude: 20,
+    longitude: 0,
     zoom: 2,
     pitch: 0,
-    bearing: 0
+    bearing: 0,
   });
 
   const [sentimentData, setSentimentData] = useState([]);
   const [breakingNews, setBreakingNews] = useState([]);
 
   useEffect(() => {
-    console.log("Fetching from:", API_URL);
-
     fetch(`${API_URL}/api/v1/sentiment/global`)
-      .then(res => res.json())
-      .then(data => {
-        console.log("Sentiment data:", data);
-        setSentimentData(data);
-      })
-      .catch(err => console.error("Sentiment API error:", err));
+      .then((res) => res.json())
+      .then(setSentimentData)
+      .catch(console.error);
 
     fetch(`${API_URL}/api/v1/news/latest`)
-      .then(res => res.json())
-      .then(data => {
-        console.log("News data:", data);
-        setBreakingNews(data);
-      })
-      .catch(err => console.error("News API error:", err));
+      .then((res) => res.json())
+      .then(setBreakingNews)
+      .catch(console.error);
   }, []);
 
   const heatmapLayer = new HeatmapLayer({
-    id: 'sentiment-heatmap',
+    id: "sentiment-heatmap",
     data: sentimentData,
-    getPosition: d => d.coordinates,
-    getWeight: d => d.intensity || 50,
-    radiusPixels: 60,
-    visible: true,
+    getPosition: (d) => d.coordinates,
+    getWeight: (d) => d.intensity || 1,
+    radiusPixels: 80,
   });
 
   const newsLayer = new IconLayer({
-    id: 'breaking-news',
+    id: "breaking-news",
     data: breakingNews,
-    getPosition: d => d.coordinates,
-    getSize: 32,
+    getPosition: (d) => d.coordinates,
+    getIcon: () => ({
+      url: "https://upload.wikimedia.org/wikipedia/commons/e/ec/RedDot.svg",
+      width: 32,
+      height: 32,
+    }),
     sizeScale: 1,
     pickable: true,
-    getIcon: () => ({
-      url: 'https://upload.wikimedia.org/wikipedia/commons/e/ec/RedDot.svg',
-      width: 32,
-      height: 32
-    }),
-    onClick: info => console.log("Clicked news:", info.object),
-    visible: true,
   });
 
-  const handleMapClick = useCallback((event) => {
-    const { lngLat } = event;
-    console.log('Clicked:', lngLat);
+  const handleClick = useCallback((evt) => {
+    console.log("Map clicked", evt.lngLat);
   }, []);
 
   return (
-    <div style={{ height: "100vh", width: "100vw" }}>
-      <DeckGL
-        viewState={viewport}
-        controller={true}
-        onViewStateChange={({ viewState }) => setViewport(viewState)}
-        layers={[heatmapLayer, newsLayer]}
-        onClick={handleMapClick}
-      >
-        <Map
-          mapboxAccessToken={MAPBOX_TOKEN}
-          mapStyle="mapbox://styles/mapbox/dark-v11"
-          style={{ width: '100%', height: '100%' }}
-        />
-      </DeckGL>
-    </div>
+    <DeckGL
+      views={null}
+      initialViewState={viewport}
+      controller={true}
+      onViewStateChange={({ viewState }) => setViewport(viewState)}
+      layers={[heatmapLayer, newsLayer]}
+      onClick={handleClick}
+    >
+      <Map
+        mapboxAccessToken={pk.eyJ1IjoiZ2FnZW0zMyIsImEiOiJjbWtteDVxNDIwazUxM2ZxOXBwNjZzZ3k3In0.nZQO34oBZux2ZPpCS7wwnA}
+        style={{ width: "100%", height: "100%" }}
+        mapStyle="mapbox://styles/mapbox/dark-v11"
+      />
+    </DeckGL>
   );
 };
 
