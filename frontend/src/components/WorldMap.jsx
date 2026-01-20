@@ -236,3 +236,4 @@ useEffect(() => {
 };
 
 export default WorldMap;
+console.log("Trigger redeploy");
