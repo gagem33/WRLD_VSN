@@ -7,15 +7,47 @@ httpx==0.25.1
 sqlalchemy==2.0.23
 asyncpg==0.29.0
 psycopg2-binary==2.9.9
-redis==5.0.1
-kafka-python==2.0.2
-pandas==2.1.3
-numpy==1.26.2
-scikit-learn==1.3.2
-transformers==4.35.2
-torch==2.1.1
-sentence-transformers==2.2.2
 aiohttp==3.9.1
 python-dateutil==2.8.2
-pytz==2023.3
 pydantic-settings==2.1.0
+```
+
+**What we removed:**
+- ❌ `transformers` (2GB+ of AI models)
+- ❌ `torch` (1GB+ PyTorch)
+- ❌ `sentence-transformers` (500MB+)
+- ❌ `scikit-learn` (200MB+)
+
+**What this means:**
+- ✅ Backend API works
+- ✅ Map loads
+- ✅ Data flows
+- ⚠️ No AI sentiment analysis (use demo data instead)
+
+You can add AI features later when you upgrade Railway or use a different service for AI.
+
+---
+
+## 🎯 My Recommendation: Option 1 (Demo Mode)
+
+Use the lightweight Dockerfile I provided above. Here's exactly what to do:
+
+### Step-by-Step Fix:
+
+1. **Go to your GitHub repo**
+2. **Navigate to:** `backend/Dockerfile`
+3. **Click the pencil icon** to edit
+4. **Replace entire file** with the lightweight Dockerfile I showed above
+5. **Commit changes**
+6. **Railway will auto-rebuild** (takes 1-2 minutes)
+7. **Should deploy successfully!** ✅
+
+---
+
+## 🎉 After It Works
+
+Once deployed with demo backend:
+
+### Test It:
+```
+https://your-railway-url.railway.app/docs
