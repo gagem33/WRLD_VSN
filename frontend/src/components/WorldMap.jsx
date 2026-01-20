@@ -3,7 +3,7 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import Map, { Marker } from "react-map-gl";
 import DeckGL, { HeatmapLayer, IconLayer } from "deck.gl";
 
-const MAPBOX_TOKEN = "YOUR_REAL_MAPBOX_TOKEN"; // Paste your Mapbox token here
+const MAPBOX_TOKEN = "pk.eyJ1IjoiZ2FnZW0zMyIsImEiOiJjbWtuNzZnNHcwcDdyM2ZvdmU2azA1ZWQ1In0.UtKWHYCxgad7oaVlhri2Uw"; // Paste your Mapbox token here
 const API_URL = "https://wrldvsn.up.railway.app"; // Your Railway backend
 
 const WorldMap = () => {
