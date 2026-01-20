@@ -65,7 +65,7 @@ const WorldMap = () => {
       onClick={handleClick}
     >
       <Map
-        mapboxAccessToken= {eyJ1IjoiZ2FnZW0zMyIsImEiOiJjbWtuNzZnNHcwcDdyM2ZvdmU2azA1ZWQ1In0.UtKWHYCxgad7oaVlhri2Uw}
+        mapboxAccessToken= "eyJ1IjoiZ2FnZW0zMyIsImEiOiJjbWtuNzZnNHcwcDdyM2ZvdmU2azA1ZWQ1In0.UtKWHYCxgad7oaVlhri2Uw"
         style={{ width: "100%", height: "100%" }}
         mapStyle="mapbox://styles/mapbox/dark-v11"
       />
