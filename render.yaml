@@ -1,0 +1,53 @@
+# Render.com Blueprint
+# Free tier: Deploy backend + database for free
+# Visit: https://render.com
+
+services:
+  # PostgreSQL Database
+  - type: pserv
+    name: wrld-vsn-db
+    env: docker
+    plan: free
+    repo: https://github.com/YOUR-USERNAME/wrld-vsn
+    dockerfilePath: ./infrastructure/database/Dockerfile-render
+    envVars:
+      - key: POSTGRES_DB
+        value: wrld_vsn
+      - key: POSTGRES_USER
+        value: wrld_admin
+      - key: POSTGRES_PASSWORD
+        generateValue: true
+    disk:
+      name: wrld-vsn-data
+      mountPath: /var/lib/postgresql/data
+      sizeGB: 1
+
+  # Backend API
+  - type: web
+    name: wrld-vsn-api
+    env: docker
+    plan: free
+    repo: https://github.com/YOUR-USERNAME/wrld-vsn
+    dockerfilePath: ./backend/Dockerfile
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: wrld-vsn-db
+          property: connectionString
+      - key: MAPBOX_TOKEN
+        sync: false
+      - key: NEWSAPI_KEY
+        sync: false
+    healthCheckPath: /
+
+  # Frontend (Static Site)
+  - type: web
+    name: wrld-vsn-frontend
+    env: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: ./frontend/build
+    envVars:
+      - key: REACT_APP_API_URL
+        value: https://wrld-vsn-api.onrender.com
+      - key: REACT_APP_MAPBOX_TOKEN
+        sync: false
