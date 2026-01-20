@@ -22,32 +22,22 @@ const WorldMap = () => {
   const [marketLayer, setMarketLayer] = useState(true);
 
   // Mock data - replace with real API calls
-  const sentimentData = useMemo(() => [
-    { coordinates: [-74.006, 40.7128], sentiment: 0.8, intensity: 100, location: 'New York' },
-    { coordinates: [139.6917, 35.6895], sentiment: -0.3, intensity: 80, location: 'Tokyo' },
-    { coordinates: [-0.1276, 51.5074], sentiment: 0.5, intensity: 90, location: 'London' },
-    { coordinates: [2.3522, 48.8566], sentiment: -0.6, intensity: 70, location: 'Paris' },
-    { coordinates: [121.4737, 31.2304], sentiment: 0.2, intensity: 95, location: 'Shanghai' }
-  ], []);
+const [sentimentData, setSentimentData] = useState([]);
+const [breakingNews, setBreakingNews] = useState([]);
+const API_URL = process.env.REACT_APP_API_URL;
 
-  const breakingNews = useMemo(() => [
-    {
-      id: 1,
-      coordinates: [-74.006, 40.7128],
-      title: 'Fed signals rate cut',
-      sentiment: 'bullish',
-      urgency: 'high',
-      timestamp: new Date()
-    },
-    {
-      id: 2,
-      coordinates: [139.6917, 35.6895],
-      title: 'BOJ maintains policy',
-      sentiment: 'neutral',
-      urgency: 'medium',
-      timestamp: new Date()
-    }
-  ], []);
+useEffect(() => {
+  fetch(`${API_URL}/sentiment`)
+    .then(res => res.json())
+    .then(data => setSentimentData(data))
+    .catch(err => console.error("Sentiment fetch error:", err));
+
+  fetch(`${API_URL}/news`)
+    .then(res => res.json())
+    .then(data => setBreakingNews(data))
+    .catch(err => console.error("News fetch error:", err));
+}, []);
+
 
   // Heatmap layer for sentiment
   const heatmapLayer = new HeatmapLayer({
