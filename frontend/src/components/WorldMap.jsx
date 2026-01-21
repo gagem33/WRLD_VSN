@@ -1,12 +1,9 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import Map from 'react-map-gl';
-import DeckGL from '@deck.gl/react';
-import { ScatterplotLayer, ArcLayer, PathLayer } from 'deck.gl';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import Map, { Marker, Layer, Source } from 'react-map-gl';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Globe2, Map as MapIcon, Menu, X, Activity, Zap, TrendingUp, TrendingDown,
-  Layers, Settings, Filter, Search, Ship, Plane, AlertCircle, DollarSign,
-  Users, Shield, Navigation, BarChart3, Radio, Eye
+  Layers, Settings, Filter, Search, AlertCircle, BarChart3, Radio
 } from 'lucide-react';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
@@ -25,9 +22,7 @@ const WorldMap = () => {
     latitude: 20,
     zoom: 2,
     pitch: 45,
-    bearing: 0,
-    minZoom: 1,
-    maxZoom: 18
+    bearing: 0
   });
 
   const [sentimentData, setSentimentData] = useState([]);
@@ -38,8 +33,6 @@ const WorldMap = () => {
   const [layers, setLayers] = useState({
     markets: true,
     events: true,
-    conflicts: false,
-    trade: false,
     connections: false
   });
 
@@ -75,19 +68,16 @@ const WorldMap = () => {
         const sentimentRes = await fetch(`${API_URL}/api/v1/sentiment/global`);
         const sentimentJson = await sentimentRes.json();
         
-        // CRITICAL: Geographic coordinates that stay pinned
         const transformed = sentimentJson.map(item => ({
-          coordinates: [
-            Number(item.coordinates.longitude), 
-            Number(item.coordinates.latitude)
-          ],
+          id: item.location.replace(/\s/g, '_'),
+          longitude: Number(item.coordinates.longitude),
+          latitude: Number(item.coordinates.latitude),
           sentiment: item.sentiment_score,
           location: item.location,
-          source_count: item.source_count,
-          intensity: item.intensity || 50
+          source_count: item.source_count
         }));
         
-        console.log('📍 Markets loaded:', transformed.length);
+        console.log('📍 Markets loaded:', transformed);
         setSentimentData(transformed);
 
         const newsRes = await fetch(`${API_URL}/api/v1/news/breaking?limit=20`);
@@ -99,8 +89,7 @@ const WorldMap = () => {
           type: item.sentiment === 'bullish' ? 'positive' : item.sentiment === 'bearish' ? 'negative' : 'neutral',
           title: item.title,
           source: item.source,
-          timestamp: new Date(item.timestamp),
-          urgency: item.urgency || 'medium'
+          timestamp: new Date(item.timestamp)
         }));
         setLiveFeed(feed);
         
@@ -116,191 +105,15 @@ const WorldMap = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // MARKET SENTIMENT MARKERS - Pinned to geographic coordinates
-  const marketMarkers = useMemo(() => new ScatterplotLayer({
-    id: 'market-sentiment',
-    data: sentimentData,
-    
-    // CRITICAL: Geographic coordinate system
-    coordinateSystem: 1, // LNGLAT
-    
-    // Position returns [longitude, latitude]
-    getPosition: d => d.coordinates,
-    
-    // Visual properties
-    pickable: true,
-    opacity: 0.95,
-    filled: true,
-    stroked: true,
-    
-    // CRITICAL: Geographic sizing so dots stay pinned
-    radiusUnits: 'common',
-    radiusScale: 50000,
-    getRadius: d => d.intensity || 50,
-    
-    // Pixel constraints
-    radiusMinPixels: 8,
-    radiusMaxPixels: 22,
-    
-    // Outline
-    lineWidthUnits: 'pixels',
-    lineWidthMinPixels: 2,
-    getLineWidth: 2,
-    getLineColor: [255, 255, 255, 200],
-    
-    // Color by sentiment
-    getFillColor: d => {
-      const s = d.sentiment;
-      if (s > 0.4) return [16, 185, 129, 255];     // Strong green
-      if (s > 0.2) return [52, 211, 153, 230];     // Green
-      if (s > 0) return [250, 204, 21, 210];       // Yellow
-      if (s > -0.2) return [251, 146, 60, 210];    // Orange  
-      if (s > -0.4) return [248, 113, 113, 230];   // Light red
-      return [239, 68, 68, 255];                   // Strong red
-    },
-    
-    // Click handler
-    onClick: (info) => {
-      if (info.object) {
-        setSelectedMarker({
-          type: 'market',
-          ...info.object
-        });
-      }
-    },
-    
-    // Update triggers
-    updateTriggers: {
-      getPosition: sentimentData,
-      getFillColor: sentimentData
-    },
-    
-    visible: layers.markets
-  }), [sentimentData, layers.markets]);
-
-  // PULSE RINGS for high-activity zones
-  const pulseRings = useMemo(() => new ScatterplotLayer({
-    id: 'activity-pulses',
-    data: sentimentData.filter(d => Math.abs(d.sentiment) > 0.5),
-    
-    coordinateSystem: 1,
-    getPosition: d => d.coordinates,
-    
-    pickable: false,
-    opacity: 0.25,
-    filled: false,
-    stroked: true,
-    
-    radiusUnits: 'common',
-    radiusScale: 70000,
-    getRadius: d => (d.intensity || 50) * 1.4,
-    
-    radiusMinPixels: 16,
-    radiusMaxPixels: 35,
-    
-    lineWidthUnits: 'pixels',
-    lineWidthMinPixels: 2,
-    getLineWidth: 2,
-    getLineColor: d => d.sentiment > 0 ? [16, 185, 129, 120] : [239, 68, 68, 120],
-    
-    updateTriggers: {
-      getPosition: sentimentData
-    },
-    
-    visible: layers.markets
-  }), [sentimentData, layers.markets]);
-
-  // NEWS/EVENT MARKERS
-  const eventMarkers = useMemo(() => new ScatterplotLayer({
-    id: 'events',
-    data: newsData.filter(item => item.coordinates),
-    
-    coordinateSystem: 1,
-    getPosition: d => [Number(d.coordinates.longitude), Number(d.coordinates.latitude)],
-    
-    pickable: true,
-    opacity: 1,
-    filled: true,
-    stroked: true,
-    
-    radiusUnits: 'common',
-    radiusScale: 40000,
-    getRadius: 60,
-    
-    radiusMinPixels: 9,
-    radiusMaxPixels: 20,
-    
-    lineWidthUnits: 'pixels',
-    lineWidthMinPixels: 2,
-    getLineWidth: 2,
-    getLineColor: [255, 255, 255, 255],
-    
-    getFillColor: d => {
-      if (d.urgency === 'high') return [239, 68, 68, 255];
-      if (d.urgency === 'medium') return [251, 146, 60, 255];
-      return [59, 130, 246, 255];
-    },
-    
-    onClick: (info) => {
-      if (info.object) {
-        setSelectedMarker({
-          type: 'event',
-          ...info.object
-        });
-      }
-    },
-    
-    updateTriggers: {
-      getPosition: newsData
-    },
-    
-    visible: layers.events
-  }), [newsData, layers.events]);
-
-  // NETWORK CONNECTIONS between correlated markets
-  const connectionArcs = useMemo(() => {
-    if (!layers.connections || sentimentData.length < 2) return null;
-    
-    const connections = [];
-    for (let i = 0; i < sentimentData.length; i++) {
-      for (let j = i + 1; j < sentimentData.length; j++) {
-        const diff = Math.abs(sentimentData[i].sentiment - sentimentData[j].sentiment);
-        if (diff < 0.15) {
-          connections.push({
-            source: sentimentData[i].coordinates,
-            target: sentimentData[j].coordinates,
-            strength: 1 - diff
-          });
-        }
-      }
-    }
-    
-    return new ArcLayer({
-      id: 'market-connections',
-      data: connections.slice(0, 25),
-      
-      getSourcePosition: d => d.source,
-      getTargetPosition: d => d.target,
-      
-      getSourceColor: [59, 130, 246, 80],
-      getTargetColor: [147, 51, 234, 80],
-      
-      getWidth: d => d.strength * 2,
-      widthMinPixels: 1,
-      widthMaxPixels: 3,
-      
-      greatCircle: true,
-      
-      visible: true
-    });
-  }, [sentimentData, layers.connections]);
-
-  const deckLayers = [
-    pulseRings,
-    marketMarkers,
-    eventMarkers,
-    connectionArcs
-  ].filter(Boolean);
+  // Get color based on sentiment
+  const getMarkerColor = (sentiment) => {
+    if (sentiment > 0.4) return '#10b981';      // Strong green
+    if (sentiment > 0.2) return '#34d399';      // Green
+    if (sentiment > 0) return '#facc15';        // Yellow
+    if (sentiment > -0.2) return '#fb923c';     // Orange
+    if (sentiment > -0.4) return '#f87171';     // Light red
+    return '#ef4444';                           // Strong red
+  };
 
   if (loading) {
     return (
@@ -308,7 +121,7 @@ const WorldMap = () => {
         <div className="text-center">
           <Globe2 className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-pulse" />
           <div className="text-white text-2xl font-bold mb-2">WRLD VSN</div>
-          <div className="text-gray-500 text-sm">Loading global intelligence network...</div>
+          <div className="text-gray-500 text-sm">Loading global intelligence...</div>
         </div>
       </div>
     );
@@ -318,14 +131,12 @@ const WorldMap = () => {
     <div className="h-screen w-screen relative bg-black overflow-hidden flex">
       {/* Left Sidebar */}
       <div className="w-16 bg-gray-950 border-r border-gray-800 flex flex-col items-center py-4 space-y-3 z-30">
-        {/* Logo */}
         <div className="w-11 h-11 bg-gradient-to-br from-blue-600 to-blue-700 rounded-lg flex items-center justify-center mb-2">
           <Globe2 size={24} className="text-white" />
         </div>
         
         <div className="w-full h-px bg-gray-800 my-1"></div>
         
-        {/* Controls */}
         <button 
           onClick={() => setMenuOpen(!menuOpen)}
           className={`w-11 h-11 rounded-lg flex items-center justify-center transition-all ${
@@ -344,31 +155,15 @@ const WorldMap = () => {
           {viewMode === 'globe' ? <MapIcon size={20} /> : <Globe2 size={20} />}
         </button>
         
-        <button 
-          className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
-          title="Data Layers"
-        >
+        <button className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white" title="Layers">
           <Layers size={20} />
         </button>
         
-        <button 
-          className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
-          title="Search"
-        >
+        <button className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white" title="Search">
           <Search size={20} />
         </button>
         
-        <button 
-          className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
-          title="Filters"
-        >
-          <Filter size={20} />
-        </button>
-        
-        <button 
-          className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
-          title="Analytics"
-        >
+        <button className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white" title="Analytics">
           <BarChart3 size={20} />
         </button>
         
@@ -376,10 +171,7 @@ const WorldMap = () => {
         
         <div className="w-full h-px bg-gray-800 my-1"></div>
         
-        <button 
-          className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
-          title="Settings"
-        >
+        <button className="w-11 h-11 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white" title="Settings">
           <Settings size={20} />
         </button>
       </div>
@@ -412,9 +204,7 @@ const WorldMap = () => {
                 {[
                   { key: 'markets', label: 'Market Sentiment', icon: TrendingUp, color: 'text-green-500' },
                   { key: 'events', label: 'Breaking Events', icon: AlertCircle, color: 'text-yellow-500' },
-                  { key: 'conflicts', label: 'Conflicts & Tensions', icon: Shield, color: 'text-red-500' },
-                  { key: 'trade', label: 'Trade Routes', icon: Ship, color: 'text-blue-500' },
-                  { key: 'connections', label: 'Market Correlations', icon: Radio, color: 'text-purple-500' }
+                  { key: 'connections', label: 'Correlations', icon: Radio, color: 'text-purple-500' }
                 ].map(({ key, label, icon: Icon, color }) => (
                   <label key={key} className="flex items-center justify-between cursor-pointer group px-3 py-2 rounded-lg hover:bg-gray-800/50 transition-all">
                     <div className="flex items-center space-x-3">
@@ -460,7 +250,7 @@ const WorldMap = () => {
                 </div>
               </div>
               
-              {/* Live Statistics */}
+              {/* Stats */}
               <div className="space-y-2">
                 <div className="text-xs text-gray-400 uppercase tracking-wider mb-3 font-semibold">Live Statistics</div>
                 <div className="bg-gray-800/50 rounded-lg p-4 space-y-3">
@@ -522,31 +312,93 @@ const WorldMap = () => {
 
         {/* Map + Feed */}
         <div className="flex-1 flex">
-          {/* Map */}
+          {/* Map with NATIVE MARKERS */}
           <div className="flex-1 relative">
-            <DeckGL
+            <Map
               ref={mapRef}
-              viewState={viewport}
-              controller={{
-                dragPan: true,
-                dragRotate: viewMode === 'globe',
-                scrollZoom: true,
-                touchZoom: true,
-                touchRotate: viewMode === 'globe',
-                keyboard: true,
-                doubleClickZoom: true,
-                inertia: true
-              }}
-              onViewStateChange={({ viewState }) => setViewport(viewState)}
-              layers={deckLayers}
+              {...viewport}
+              onMove={evt => setViewport(evt.viewState)}
+              mapboxAccessToken={MAPBOX_TOKEN}
+              mapStyle="mapbox://styles/mapbox/dark-v11"
+              projection={viewMode === 'globe' ? 'globe' : 'mercator'}
+              dragRotate={viewMode === 'globe'}
+              touchZoomRotate={viewMode === 'globe'}
             >
-              <Map
-                ref={mapRef}
-                mapboxAccessToken={MAPBOX_TOKEN}
-                mapStyle="mapbox://styles/mapbox/dark-v11"
-                projection={viewMode === 'globe' ? 'globe' : 'mercator'}
-              />
-            </DeckGL>
+              {/* MARKET SENTIMENT MARKERS - Native Mapbox markers that STAY PINNED */}
+              {layers.markets && sentimentData.map((city) => (
+                <Marker
+                  key={city.id}
+                  longitude={city.longitude}
+                  latitude={city.latitude}
+                  anchor="center"
+                  onClick={(e) => {
+                    e.originalEvent.stopPropagation();
+                    setSelectedMarker({
+                      type: 'market',
+                      ...city
+                    });
+                  }}
+                >
+                  <div className="relative cursor-pointer group">
+                    {/* Outer glow ring */}
+                    {Math.abs(city.sentiment) > 0.5 && (
+                      <div 
+                        className="absolute inset-0 rounded-full animate-pulse"
+                        style={{
+                          width: '32px',
+                          height: '32px',
+                          transform: 'translate(-50%, -50%)',
+                          left: '50%',
+                          top: '50%',
+                          border: `2px solid ${getMarkerColor(city.sentiment)}40`,
+                          boxShadow: `0 0 20px ${getMarkerColor(city.sentiment)}40`
+                        }}
+                      />
+                    )}
+                    
+                    {/* Main marker dot */}
+                    <div
+                      className="rounded-full transition-all group-hover:scale-125"
+                      style={{
+                        width: '16px',
+                        height: '16px',
+                        backgroundColor: getMarkerColor(city.sentiment),
+                        border: '2px solid white',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+                      }}
+                    />
+                  </div>
+                </Marker>
+              ))}
+
+              {/* NEWS EVENT MARKERS */}
+              {layers.events && newsData.filter(item => item.coordinates).map((event) => (
+                <Marker
+                  key={event.id}
+                  longitude={Number(event.coordinates.longitude)}
+                  latitude={Number(event.coordinates.latitude)}
+                  anchor="center"
+                  onClick={(e) => {
+                    e.originalEvent.stopPropagation();
+                    setSelectedMarker({
+                      type: 'event',
+                      ...event
+                    });
+                  }}
+                >
+                  <div
+                    className="rounded-full cursor-pointer transition-all hover:scale-125"
+                    style={{
+                      width: '14px',
+                      height: '14px',
+                      backgroundColor: event.urgency === 'high' ? '#ef4444' : event.urgency === 'medium' ? '#fb923c' : '#3b82f6',
+                      border: '2px solid white',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+                    }}
+                  />
+                </Marker>
+              ))}
+            </Map>
 
             {/* Legend */}
             <div className="absolute bottom-6 left-6 bg-gray-900/95 backdrop-blur-sm border border-gray-800 rounded-lg px-4 py-3">
@@ -653,11 +505,9 @@ const WorldMap = () => {
                   </div>
                 )}
 
-                {selectedMarker.coordinates && (
-                  <div className="text-gray-600 text-xs font-mono">
-                    {selectedMarker.coordinates[0].toFixed(4)}°, {selectedMarker.coordinates[1].toFixed(4)}°
-                  </div>
-                )}
+                <div className="text-gray-600 text-xs font-mono">
+                  {selectedMarker.longitude?.toFixed(4)}°, {selectedMarker.latitude?.toFixed(4)}°
+                </div>
               </div>
             </div>
           </motion.div>
