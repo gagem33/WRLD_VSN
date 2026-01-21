@@ -1,9 +1,9 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import Map from 'react-map-gl';
-import { HeatmapLayer, IconLayer } from 'deck.gl';
+import { ScatterplotLayer, IconLayer, ArcLayer } from 'deck.gl';
 import DeckGL from '@deck.gl/react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { TrendingUp, TrendingDown, AlertCircle, Activity } from 'lucide-react';
+import { TrendingUp, TrendingDown, AlertTriangle, Activity, Zap, Users, DollarSign, Globe } from 'lucide-react';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
 const MAPBOX_TOKEN = process.env.REACT_APP_MAPBOX_TOKEN;
@@ -11,29 +11,34 @@ const API_URL = process.env.REACT_APP_API_URL;
 
 const WorldMap = () => {
   const [viewport, setViewport] = useState({
-    longitude: 0,
-    latitude: 20,
+    longitude: 15,
+    latitude: 30,
     zoom: 2,
-    pitch: 0,
+    pitch: 0,  // Flat view
     bearing: 0
   });
 
   const [selectedLocation, setSelectedLocation] = useState(null);
-  const [sentimentLayer, setSentimentLayer] = useState(true);
-  const [newsLayer, setNewsLayer] = useState(true);
   const [sentimentData, setSentimentData] = useState([]);
   const [newsData, setNewsData] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [liveFeed, setLiveFeed] = useState([]);
 
-  // Fetch sentiment data from API
+  // Layer visibility toggles
+  const [layers, setLayers] = useState({
+    sentiment: true,
+    news: true,
+    markets: true,
+    conflicts: true
+  });
+
+  // Fetch data from API
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Fetch sentiment
         const sentimentRes = await fetch(`${API_URL}/api/v1/sentiment/global`);
         const sentimentJson = await sentimentRes.json();
         
-        // Transform to format needed for heatmap
         const transformed = sentimentJson.map(item => ({
           coordinates: [item.coordinates.longitude, item.coordinates.latitude],
           sentiment: item.sentiment_score,
@@ -44,10 +49,20 @@ const WorldMap = () => {
         
         setSentimentData(transformed);
 
-        // Fetch news
-        const newsRes = await fetch(`${API_URL}/api/v1/news/breaking?limit=10`);
+        const newsRes = await fetch(`${API_URL}/api/v1/news/breaking?limit=20`);
         const newsJson = await newsRes.json();
         setNewsData(newsJson);
+        
+        // Create live feed from news
+        const feed = newsJson.map(item => ({
+          id: item.id,
+          type: item.sentiment === 'bullish' ? 'positive' : item.sentiment === 'bearish' ? 'negative' : 'neutral',
+          title: item.title,
+          source: item.source,
+          timestamp: new Date(item.timestamp),
+          location: 'Global'
+        }));
+        setLiveFeed(feed);
         
         setLoading(false);
       } catch (error) {
@@ -57,121 +72,134 @@ const WorldMap = () => {
     };
 
     fetchData();
-    // Refresh every 5 minutes
-    const interval = setInterval(fetchData, 300000);
+    const interval = setInterval(fetchData, 60000); // Every minute
     return () => clearInterval(interval);
   }, []);
 
-  // Heatmap layer for sentiment
-  const heatmapLayer = useMemo(() => new HeatmapLayer({
-    id: 'sentiment-heatmap',
+  // Sentiment dots - small, crisp circles
+  const sentimentLayer = useMemo(() => new ScatterplotLayer({
+    id: 'sentiment-dots',
     data: sentimentData,
     getPosition: d => d.coordinates,
-    getWeight: d => d.intensity,
-    radiusPixels: 60,
-    intensity: 1,
-    threshold: 0.03,
-    colorRange: [
-      [178, 24, 43, 100],      // Deep red (very negative)
-      [239, 138, 98, 150],     // Orange-red
-      [253, 219, 199, 100],    // Light salmon
-      [247, 247, 247, 50],     // Neutral white
-      [209, 229, 240, 100],    // Light blue
-      [103, 169, 207, 150],    // Medium blue
-      [33, 102, 172, 200]      // Deep blue (very positive)
-    ],
-    visible: sentimentLayer
-  }), [sentimentData, sentimentLayer]);
+    getFillColor: d => {
+      // Color based on sentiment
+      if (d.sentiment > 0.3) return [67, 160, 71, 200];      // Green - bullish
+      if (d.sentiment > 0) return [129, 199, 132, 180];      // Light green
+      if (d.sentiment > -0.3) return [255, 167, 38, 180];    // Orange - neutral/caution
+      return [229, 57, 53, 200];                             // Red - bearish
+    },
+    getRadius: 30000,  // Much smaller, precise dots
+    radiusMinPixels: 3,
+    radiusMaxPixels: 8,
+    pickable: true,
+    onClick: (info) => {
+      if (info.object) {
+        setSelectedLocation({
+          type: 'sentiment',
+          location: info.object.location,
+          sentiment: info.object.sentiment,
+          coordinates: info.object.coordinates,
+          sources: info.object.source_count
+        });
+      }
+    },
+    visible: layers.sentiment,
+    opacity: 0.9
+  }), [sentimentData, layers.sentiment]);
 
-  // Breaking news markers
-  const newsIconLayer = useMemo(() => new IconLayer({
-    id: 'breaking-news',
+  // News events - precise markers
+  const newsLayer = useMemo(() => new ScatterplotLayer({
+    id: 'news-markers',
     data: newsData,
     getPosition: d => [d.coordinates.longitude, d.coordinates.latitude],
-    getIcon: d => ({
-      url: d.urgency === 'high' 
-        ? 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0iI2VmNDQ0NCIvPjwvc3ZnPg==' 
-        : 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxMiIgY3k9IjEyIiByPSIxMCIgZmlsbD0iI2Y5NzMxNiIvPjwvc3ZnPg==',
-      width: 32,
-      height: 32
-    }),
-    getSize: 32,
-    sizeScale: 1,
+    getFillColor: d => {
+      if (d.urgency === 'high') return [239, 68, 68, 255];     // Bright red
+      if (d.urgency === 'medium') return [251, 146, 60, 255];  // Orange
+      return [59, 130, 246, 255];                              // Blue
+    },
+    getRadius: 25000,
+    radiusMinPixels: 4,
+    radiusMaxPixels: 10,
+    getLineColor: [255, 255, 255, 200],
+    lineWidthMinPixels: 1,
+    stroked: true,
     pickable: true,
     onClick: (info) => setSelectedLocation(info.object),
-    visible: newsLayer
-  }), [newsData, newsLayer]);
+    visible: layers.news
+  }), [newsData, layers.news]);
 
-  const layers = [heatmapLayer, newsIconLayer];
-
-  const handleMapClick = useCallback((event) => {
-    const { lngLat } = event;
-    console.log('Clicked:', lngLat);
-  }, []);
+  const allLayers = [sentimentLayer, newsLayer];
 
   if (loading) {
     return (
-      <div className="h-screen w-screen flex items-center justify-center bg-gray-900 text-white">
-        <div className="text-xl">Loading WRLD VSN...</div>
+      <div className="h-screen w-screen flex items-center justify-center bg-black text-white">
+        <div className="text-center">
+          <div className="text-xl mb-2">WRLD VSN</div>
+          <div className="text-sm text-gray-500">Initializing global intelligence network...</div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen w-screen relative bg-gray-900">
-      {/* Controls */}
-      <div className="absolute top-4 left-4 z-10 bg-gray-800/90 backdrop-blur-sm rounded-lg p-4 text-white">
-        <h1 className="text-2xl font-bold mb-4">WRLD VSN</h1>
-        <div className="space-y-2">
-          <label className="flex items-center space-x-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={sentimentLayer}
-              onChange={(e) => setSentimentLayer(e.target.checked)}
-              className="w-4 h-4"
-            />
-            <span className="text-sm">Sentiment Heatmap</span>
-          </label>
-          <label className="flex items-center space-x-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={newsLayer}
-              onChange={(e) => setNewsLayer(e.target.checked)}
-              className="w-4 h-4"
-            />
-            <span className="text-sm">Breaking News</span>
-          </label>
-        </div>
-        <div className="mt-4 text-xs text-gray-400">
-          <div>Cities tracked: {sentimentData.length}</div>
-          <div>News events: {newsData.length}</div>
+    <div className="h-screen w-screen relative bg-black overflow-hidden">
+      {/* Top Bar - Bloomberg Style */}
+      <div className="absolute top-0 left-0 right-0 z-20 bg-gray-900/95 border-b border-gray-800 px-4 py-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-6">
+            <div className="flex items-center space-x-2">
+              <Globe className="text-blue-500" size={20} />
+              <span className="text-white font-bold text-lg">WRLD VSN</span>
+            </div>
+            <div className="flex items-center space-x-1 text-xs">
+              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+              <span className="text-gray-400">LIVE</span>
+            </div>
+          </div>
+          
+          <div className="flex items-center space-x-4 text-xs">
+            <div className="flex items-center space-x-2">
+              <Activity size={14} className="text-blue-400" />
+              <span className="text-gray-400">{sentimentData.length} Markets</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Zap size={14} className="text-yellow-400" />
+              <span className="text-gray-400">{newsData.length} Events</span>
+            </div>
+            <div className="text-gray-500">{new Date().toLocaleTimeString()}</div>
+          </div>
         </div>
       </div>
 
-      {/* Sentiment Legend */}
-      {sentimentLayer && (
-        <div className="absolute bottom-4 left-4 z-10 bg-gray-800/90 backdrop-blur-sm rounded-lg p-4 text-white">
-          <div className="text-sm font-semibold mb-2">Sentiment</div>
-          <div className="flex items-center space-x-2">
-            <div className="flex-1 h-3 rounded" style={{
-              background: 'linear-gradient(to right, #b2182b, #ef8a62, #fddbc7, #f7f7f7, #d1e5f0, #67a9cf, #2166ac)'
-            }}></div>
-          </div>
-          <div className="flex justify-between text-xs mt-1">
-            <span className="flex items-center"><TrendingDown size={12} className="mr-1" />Bearish</span>
-            <span>Neutral</span>
-            <span className="flex items-center"><TrendingUp size={12} className="mr-1" />Bullish</span>
-          </div>
+      {/* Layer Controls - Compact */}
+      <div className="absolute top-16 left-4 z-10 bg-gray-900/90 backdrop-blur-sm border border-gray-800 rounded">
+        <div className="p-2 space-y-1 text-xs">
+          {[
+            { key: 'sentiment', label: 'Sentiment', icon: TrendingUp },
+            { key: 'news', label: 'News', icon: AlertTriangle },
+            { key: 'markets', label: 'Markets', icon: DollarSign },
+            { key: 'conflicts', label: 'Conflicts', icon: Users }
+          ].map(({ key, label, icon: Icon }) => (
+            <label key={key} className="flex items-center space-x-2 cursor-pointer text-gray-300 hover:text-white">
+              <input
+                type="checkbox"
+                checked={layers[key]}
+                onChange={(e) => setLayers({ ...layers, [key]: e.target.checked })}
+                className="w-3 h-3"
+              />
+              <Icon size={12} />
+              <span>{label}</span>
+            </label>
+          ))}
         </div>
-      )}
+      </div>
 
-      {/* Map */}
+      {/* Main Map - Flat 2D */}
       <DeckGL
         viewState={viewport}
         controller={true}
         onViewStateChange={({ viewState }) => setViewport(viewState)}
-        layers={layers}
-        onClick={handleMapClick}
+        layers={allLayers}
       >
         <Map
           mapboxAccessToken={MAPBOX_TOKEN}
@@ -180,77 +208,103 @@ const WorldMap = () => {
         />
       </DeckGL>
 
-      {/* Location Detail Panel */}
+      {/* Right Panel - Live Feed */}
+      <div className="absolute top-16 right-0 bottom-0 w-80 bg-gray-900/95 backdrop-blur-sm border-l border-gray-800 z-10 overflow-hidden flex flex-col">
+        <div className="p-3 border-b border-gray-800">
+          <div className="text-xs font-semibold text-white">LIVE INTELLIGENCE FEED</div>
+        </div>
+        
+        <div className="flex-1 overflow-y-auto">
+          {liveFeed.map((item) => (
+            <div key={item.id} className="p-3 border-b border-gray-800 hover:bg-gray-800/50 cursor-pointer transition-colors">
+              <div className="flex items-start space-x-2">
+                <div className={`w-1 h-full rounded-full mt-1 ${
+                  item.type === 'positive' ? 'bg-green-500' : 
+                  item.type === 'negative' ? 'bg-red-500' : 
+                  'bg-yellow-500'
+                }`}></div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-white font-medium mb-1 line-clamp-2">
+                    {item.title}
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-500">{item.source}</span>
+                    <span className="text-gray-600">{item.timestamp.toLocaleTimeString()}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Bottom Info Panel - Sentiment Legend */}
+      <div className="absolute bottom-4 left-4 z-10 bg-gray-900/90 backdrop-blur-sm border border-gray-800 rounded px-4 py-2">
+        <div className="text-xs text-gray-400 mb-1">Market Sentiment</div>
+        <div className="flex items-center space-x-4 text-xs">
+          <div className="flex items-center space-x-1">
+            <div className="w-2 h-2 rounded-full bg-green-500"></div>
+            <span className="text-gray-300">Bullish</span>
+          </div>
+          <div className="flex items-center space-x-1">
+            <div className="w-2 h-2 rounded-full bg-orange-500"></div>
+            <span className="text-gray-300">Neutral</span>
+          </div>
+          <div className="flex items-center space-x-1">
+            <div className="w-2 h-2 rounded-full bg-red-500"></div>
+            <span className="text-gray-300">Bearish</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Location Detail Modal - When Clicked */}
       <AnimatePresence>
         {selectedLocation && (
           <motion.div
-            initial={{ x: '100%' }}
-            animate={{ x: 0 }}
-            exit={{ x: '100%' }}
-            className="absolute top-0 right-0 w-96 h-full bg-gray-800/95 backdrop-blur-md text-white overflow-y-auto z-20"
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.9 }}
+            className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-96 bg-gray-900/98 backdrop-blur-md border border-gray-700 rounded-lg shadow-2xl z-30"
           >
-            <div className="p-6">
-              <div className="flex justify-between items-start mb-4">
-                <h2 className="text-xl font-bold">{selectedLocation.title}</h2>
+            <div className="p-4">
+              <div className="flex justify-between items-start mb-3">
+                <div>
+                  <div className="text-white font-bold text-lg">
+                    {selectedLocation.location || selectedLocation.title}
+                  </div>
+                  {selectedLocation.type === 'sentiment' && (
+                    <div className={`text-xs mt-1 ${
+                      selectedLocation.sentiment > 0 ? 'text-green-400' : 'text-red-400'
+                    }`}>
+                      {selectedLocation.sentiment > 0 ? '↑' : '↓'} 
+                      {' '}{(Math.abs(selectedLocation.sentiment) * 100).toFixed(1)}% 
+                      {' '}{selectedLocation.sentiment > 0 ? 'BULLISH' : 'BEARISH'}
+                    </div>
+                  )}
+                </div>
                 <button
                   onClick={() => setSelectedLocation(null)}
-                  className="text-gray-400 hover:text-white text-2xl"
+                  className="text-gray-400 hover:text-white"
                 >
                   ×
                 </button>
               </div>
 
-              {/* Sentiment Indicator */}
-              <div className={`inline-flex items-center px-3 py-1 rounded-full text-sm mb-4 ${
-                selectedLocation.sentiment === 'bullish' 
-                  ? 'bg-green-500/20 text-green-400' 
-                  : selectedLocation.sentiment === 'bearish'
-                  ? 'bg-red-500/20 text-red-400'
-                  : 'bg-gray-500/20 text-gray-400'
-              }`}>
-                {selectedLocation.sentiment === 'bullish' ? (
-                  <TrendingUp size={16} className="mr-1" />
-                ) : selectedLocation.sentiment === 'bearish' ? (
-                  <TrendingDown size={16} className="mr-1" />
-                ) : (
-                  <Activity size={16} className="mr-1" />
+              <div className="space-y-2 text-xs">
+                {selectedLocation.summary && (
+                  <div className="text-gray-300">{selectedLocation.summary}</div>
                 )}
-                {selectedLocation.sentiment?.toUpperCase() || 'NEUTRAL'}
-              </div>
-
-              <div className="text-sm text-gray-400 mb-4">
-                {new Date(selectedLocation.timestamp).toLocaleString()}
-              </div>
-
-              {/* Content */}
-              <div className="space-y-4">
-                <div className="border-b border-gray-700 pb-2">
-                  <div className="text-sm font-semibold mb-2">Summary</div>
-                  <div className="text-sm text-gray-300">
-                    {selectedLocation.summary || 'Breaking news event'}
-                  </div>
-                </div>
-                
-                <div>
-                  <div className="text-sm font-semibold mb-2">Source</div>
-                  <div className="text-sm text-gray-300">
-                    {selectedLocation.source}
-                  </div>
-                </div>
+                {selectedLocation.sources && (
+                  <div className="text-gray-500">{selectedLocation.sources} sources</div>
+                )}
+                {selectedLocation.source && (
+                  <div className="text-gray-500">Source: {selectedLocation.source}</div>
+                )}
               </div>
             </div>
           </motion.div>
         )}
       </AnimatePresence>
-
-      {/* Status Bar */}
-      <div className="absolute bottom-4 right-4 z-10 bg-gray-800/90 backdrop-blur-sm rounded-lg px-4 py-2 text-white text-sm flex items-center space-x-4">
-        <div className="flex items-center">
-          <div className="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></div>
-          <span>Live</span>
-        </div>
-        <div>Last update: {new Date().toLocaleTimeString()}</div>
-      </div>
     </div>
   );
 };
