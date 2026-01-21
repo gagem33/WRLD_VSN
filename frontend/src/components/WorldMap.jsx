@@ -5,7 +5,7 @@ import DeckGL from '@deck.gl/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Globe2, Map as MapIcon, Menu, X, Activity, Zap,
-  TrendingUp, TrendingDown, Layers, Settings, Filter, Bell
+  TrendingUp, TrendingDown, Layers, Settings
 } from 'lucide-react';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
@@ -15,6 +15,8 @@ const API_URL = process.env.REACT_APP_API_URL;
 const WorldMap = () => {
   const [viewMode, setViewMode] = useState('globe');
   const [menuOpen, setMenuOpen] = useState(false);
+  const [currentTime, setCurrentTime] = useState(new Date()); // For live clock
+  
   const [viewport, setViewport] = useState({
     longitude: 0,
     latitude: 20,
@@ -32,6 +34,15 @@ const WorldMap = () => {
     news: true
   });
 
+  // FIX #2: Update clock every second
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000); // Update every second
+
+    return () => clearInterval(timer); // Cleanup
+  }, []);
+
   const toggleViewMode = () => {
     const newMode = viewMode === 'globe' ? 'flat' : 'globe';
     setViewMode(newMode);
@@ -42,19 +53,24 @@ const WorldMap = () => {
     }));
   };
 
+  // Fetch data
   useEffect(() => {
     const fetchData = async () => {
       try {
         const sentimentRes = await fetch(`${API_URL}/api/v1/sentiment/global`);
         const sentimentJson = await sentimentRes.json();
         
+        // FIX #1: Correct coordinate format for Deck.gl
         const transformed = sentimentJson.map(item => ({
-          position: [item.coordinates.longitude, item.coordinates.latitude],
+          // CRITICAL: [longitude, latitude] format - this pins dots to geographic coordinates
+          coordinates: [item.coordinates.longitude, item.coordinates.latitude],
           sentiment: item.sentiment_score,
           location: item.location,
           source_count: item.source_count
         }));
         
+        console.log('✅ Loaded sentiment data:', transformed.length, 'cities');
+        console.log('📍 Sample coordinates:', transformed[0]);
         setSentimentData(transformed);
 
         const newsRes = await fetch(`${API_URL}/api/v1/news/breaking?limit=20`);
@@ -72,59 +88,97 @@ const WorldMap = () => {
         
         setLoading(false);
       } catch (error) {
-        console.error('Error:', error);
+        console.error('❌ Error fetching data:', error);
         setLoading(false);
       }
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 60000);
+    const interval = setInterval(fetchData, 60000); // Refresh every minute
     return () => clearInterval(interval);
   }, []);
 
+  // FIX #1: Sentiment dots layer with GEOGRAPHIC coordinates
   const sentimentLayer = useMemo(() => new ScatterplotLayer({
-    id: 'sentiment',
+    id: 'sentiment-layer',
     data: sentimentData,
+    
+    // Interaction
     pickable: true,
     opacity: 0.9,
     filled: true,
     stroked: true,
-    radiusMinPixels: 6,
-    radiusMaxPixels: 15,
+    
+    // CRITICAL FIX: Use geographic coordinates, not pixels
+    coordinateSystem: 1, // COORDINATE_SYSTEM.LNGLAT (geographic)
+    
+    // Position using [longitude, latitude]
+    getPosition: d => d.coordinates, // Returns [lng, lat]
+    
+    // Size - use meters for geographic sizing
+    getRadius: 100000, // 100km radius in meters
+    radiusUnits: 'meters', // CRITICAL: meters, not pixels
+    radiusScale: 1,
+    radiusMinPixels: 6,  // Won't get smaller than 6px
+    radiusMaxPixels: 20, // Won't get bigger than 20px
+    
+    // Outline
     lineWidthMinPixels: 1,
-    getPosition: d => d.position,
-    getRadius: 80000,
-    radiusUnits: 'meters',
+    getLineColor: [255, 255, 255, 180],
+    
+    // Color by sentiment
     getFillColor: d => {
       const s = d.sentiment;
-      if (s > 0.3) return [34, 197, 94, 240];
-      if (s > 0) return [253, 224, 71, 200];
-      if (s > -0.3) return [251, 146, 60, 200];
-      return [239, 68, 68, 240];
+      if (s > 0.3) return [34, 197, 94, 240];   // Green - bullish
+      if (s > 0) return [253, 224, 71, 200];    // Yellow - neutral bullish  
+      if (s > -0.3) return [251, 146, 60, 200]; // Orange - neutral bearish
+      return [239, 68, 68, 240];                // Red - bearish
     },
-    getLineColor: [255, 255, 255, 180],
+    
+    // Make sure layer updates when data changes
+    updateTriggers: {
+      getPosition: sentimentData,
+      getFillColor: sentimentData
+    },
+    
     visible: layers.sentiment
   }), [sentimentData, layers.sentiment]);
 
+  // News layer with GEOGRAPHIC coordinates
   const newsLayer = useMemo(() => new ScatterplotLayer({
-    id: 'news',
+    id: 'news-layer',
     data: newsData.filter(item => item.coordinates),
+    
     pickable: true,
     opacity: 1,
     filled: true,
     stroked: true,
-    radiusMinPixels: 7,
-    radiusMaxPixels: 16,
-    lineWidthMinPixels: 2,
+    
+    // CRITICAL: Geographic coordinate system
+    coordinateSystem: 1,
+    
     getPosition: d => [d.coordinates.longitude, d.coordinates.latitude],
-    getRadius: 60000,
+    
+    // Size in meters
+    getRadius: 80000,
     radiusUnits: 'meters',
+    radiusScale: 1,
+    radiusMinPixels: 7,
+    radiusMaxPixels: 18,
+    
+    lineWidthMinPixels: 2,
+    getLineColor: [255, 255, 255, 255],
+    
     getFillColor: d => {
       if (d.urgency === 'high') return [239, 68, 68, 255];
       if (d.urgency === 'medium') return [251, 146, 60, 255];
       return [59, 130, 246, 255];
     },
-    getLineColor: [255, 255, 255, 255],
+    
+    updateTriggers: {
+      getPosition: newsData
+    },
+    
     visible: layers.news
   }), [newsData, layers.news]);
 
@@ -134,7 +188,7 @@ const WorldMap = () => {
         <div className="text-center">
           <Globe2 className="w-12 h-12 text-blue-500 mx-auto mb-4 animate-pulse" />
           <div className="text-white text-xl font-bold">WRLD VSN</div>
-          <div className="text-gray-500 text-sm mt-2">Loading...</div>
+          <div className="text-gray-500 text-sm mt-2">Loading global intelligence...</div>
         </div>
       </div>
     );
@@ -151,6 +205,7 @@ const WorldMap = () => {
         <button 
           onClick={() => setMenuOpen(!menuOpen)}
           className="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
+          title="Menu"
         >
           <Menu size={20} />
         </button>
@@ -158,17 +213,24 @@ const WorldMap = () => {
         <button 
           onClick={toggleViewMode}
           className="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
+          title={viewMode === 'globe' ? 'Switch to Flat' : 'Switch to Globe'}
         >
           {viewMode === 'globe' ? <MapIcon size={20} /> : <Globe2 size={20} />}
         </button>
         
-        <button className="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white">
+        <button 
+          className="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
+          title="Layers"
+        >
           <Layers size={20} />
         </button>
         
         <div className="flex-1"></div>
         
-        <button className="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white">
+        <button 
+          className="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors text-gray-400 hover:text-white"
+          title="Settings"
+        >
           <Settings size={20} />
         </button>
       </div>
@@ -180,6 +242,7 @@ const WorldMap = () => {
             initial={{ x: -280 }}
             animate={{ x: 0 }}
             exit={{ x: -280 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
             className="absolute left-16 top-0 bottom-0 w-64 bg-gray-900/98 backdrop-blur-md border-r border-gray-800 z-20"
           >
             <div className="p-4">
@@ -190,10 +253,12 @@ const WorldMap = () => {
                 </button>
               </div>
               
+              {/* Layer Toggles */}
               <div className="space-y-3 mb-6">
                 <div className="text-xs text-gray-400 uppercase tracking-wider mb-2">Data Layers</div>
-                <label className="flex items-center justify-between cursor-pointer">
-                  <span className="text-sm text-gray-300">Market Sentiment</span>
+                
+                <label className="flex items-center justify-between cursor-pointer group">
+                  <span className="text-sm text-gray-300 group-hover:text-white transition-colors">Market Sentiment</span>
                   <input
                     type="checkbox"
                     checked={layers.sentiment}
@@ -201,8 +266,9 @@ const WorldMap = () => {
                     className="w-4 h-4"
                   />
                 </label>
-                <label className="flex items-center justify-between cursor-pointer">
-                  <span className="text-sm text-gray-300">Breaking News</span>
+                
+                <label className="flex items-center justify-between cursor-pointer group">
+                  <span className="text-sm text-gray-300 group-hover:text-white transition-colors">Breaking News</span>
                   <input
                     type="checkbox"
                     checked={layers.news}
@@ -212,13 +278,16 @@ const WorldMap = () => {
                 </label>
               </div>
               
-              <div className="space-y-3">
+              {/* View Mode Toggle */}
+              <div className="space-y-3 mb-6">
                 <div className="text-xs text-gray-400 uppercase tracking-wider mb-2">View Mode</div>
                 <div className="flex space-x-2">
                   <button
                     onClick={() => viewMode !== 'globe' && toggleViewMode()}
                     className={`flex-1 py-2 px-3 rounded-lg flex items-center justify-center space-x-2 transition-colors ${
-                      viewMode === 'globe' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'
+                      viewMode === 'globe' 
+                        ? 'bg-blue-600 text-white' 
+                        : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                     }`}
                   >
                     <Globe2 size={16} />
@@ -227,12 +296,29 @@ const WorldMap = () => {
                   <button
                     onClick={() => viewMode !== 'flat' && toggleViewMode()}
                     className={`flex-1 py-2 px-3 rounded-lg flex items-center justify-center space-x-2 transition-colors ${
-                      viewMode === 'flat' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400'
+                      viewMode === 'flat' 
+                        ? 'bg-blue-600 text-white' 
+                        : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                     }`}
                   >
                     <MapIcon size={16} />
                     <span className="text-xs font-medium">Flat</span>
                   </button>
+                </div>
+              </div>
+              
+              {/* Stats */}
+              <div className="space-y-2">
+                <div className="text-xs text-gray-400 uppercase tracking-wider mb-2">Statistics</div>
+                <div className="bg-gray-800/50 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-400">Markets Tracked</span>
+                    <span className="text-white font-semibold">{sentimentData.length}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-gray-400">Active Events</span>
+                    <span className="text-white font-semibold">{newsData.length}</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -242,7 +328,7 @@ const WorldMap = () => {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col">
-        {/* Top Bar */}
+        {/* Top Bar with LIVE CLOCK */}
         <div className="h-14 bg-gray-900/95 border-b border-gray-800 px-6 flex items-center justify-between z-10">
           <div className="flex items-center space-x-6">
             <div>
@@ -266,20 +352,27 @@ const WorldMap = () => {
                 <span className="text-gray-300">{newsData.length} Events</span>
               </div>
             </div>
+            {/* FIX #2: Live updating clock */}
             <div className="text-gray-500 font-mono text-xs">
-              {new Date().toLocaleTimeString()}
+              {currentTime.toLocaleTimeString()}
             </div>
           </div>
         </div>
 
         {/* Map and Feed */}
         <div className="flex-1 flex">
+          {/* Map Area */}
           <div className="flex-1 relative">
             <DeckGL
               viewState={viewport}
               controller={{
+                dragPan: true,
                 dragRotate: viewMode === 'globe',
-                touchRotate: viewMode === 'globe'
+                scrollZoom: true,
+                touchZoom: true,
+                touchRotate: viewMode === 'globe',
+                keyboard: true,
+                doubleClickZoom: true
               }}
               onViewStateChange={({ viewState }) => setViewport(viewState)}
               layers={[sentimentLayer, newsLayer]}
@@ -291,8 +384,9 @@ const WorldMap = () => {
               />
             </DeckGL>
 
-            <div className="absolute bottom-6 left-6 bg-gray-900/95 border border-gray-800 rounded-lg px-4 py-3">
-              <div className="text-[10px] text-gray-400 uppercase mb-2">Sentiment</div>
+            {/* Legend */}
+            <div className="absolute bottom-6 left-6 bg-gray-900/95 backdrop-blur-sm border border-gray-800 rounded-lg px-4 py-3">
+              <div className="text-[10px] text-gray-400 uppercase tracking-wider mb-2">Market Sentiment</div>
               <div className="flex items-center space-x-4 text-xs">
                 <div className="flex items-center space-x-1.5">
                   <div className="w-3 h-3 rounded-full bg-green-500"></div>
@@ -310,27 +404,31 @@ const WorldMap = () => {
             </div>
           </div>
 
-          {/* Live Feed */}
+          {/* Live Feed Panel */}
           <div className="w-80 bg-gray-900/98 border-l border-gray-800 flex flex-col">
             <div className="px-4 py-3.5 border-b border-gray-800">
-              <div className="text-xs font-bold text-white">LIVE INTELLIGENCE</div>
-              <div className="text-xs text-gray-500 mt-0.5">Real-time events</div>
+              <div className="text-xs font-bold text-white tracking-wide">LIVE INTELLIGENCE</div>
+              <div className="text-xs text-gray-500 mt-0.5">Real-time global events</div>
             </div>
             
             <div className="flex-1 overflow-y-auto">
               {liveFeed.map((item) => (
-                <div key={item.id} className="px-4 py-3 border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer">
+                <div 
+                  key={item.id}
+                  className="px-4 py-3 border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer transition-all"
+                >
                   <div className="flex items-start space-x-2.5">
-                    <div className={`w-1 h-full rounded-full mt-1 ${
+                    <div className={`w-1 h-full rounded-full mt-1 flex-shrink-0 ${
                       item.type === 'positive' ? 'bg-green-500' : 
-                      item.type === 'negative' ? 'bg-red-500' : 'bg-yellow-500'
+                      item.type === 'negative' ? 'bg-red-500' : 
+                      'bg-yellow-500'
                     }`}></div>
                     <div className="flex-1 min-w-0">
                       <div className="text-xs text-white leading-tight mb-1.5 line-clamp-2">
                         {item.title}
                       </div>
                       <div className="flex items-center justify-between text-xs">
-                        <span className="text-gray-400">{item.source}</span>
+                        <span className="text-gray-400 font-medium">{item.source}</span>
                         <span className="text-gray-600 font-mono text-[10px]">
                           {item.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                         </span>
