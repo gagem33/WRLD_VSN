@@ -5,8 +5,7 @@ import {
   Globe2, Map as MapIcon, Menu, X, Activity, Zap, TrendingUp, TrendingDown,
   Layers, Settings, Filter, Search, AlertCircle, BarChart3, Radio, Satellite,
   Download, Clock, MapPin, Play, Pause, RefreshCw, Bell, Plus, Trash2,
-  ChevronRight, Calendar, TrendingDown as Down, ArrowUp, ArrowDown,
-  PieChart, BarChart, LineChart, Target, FileText, Image as ImageIcon
+  ChevronRight, FileText, Image as ImageIcon, ExternalLink
 } from 'lucide-react';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
@@ -20,6 +19,21 @@ const MAP_STYLES = {
   outdoors: 'mapbox://styles/mapbox/outdoors-v12'
 };
 
+// Helper to get relative time (e.g., "2 hours ago")
+const getRelativeTime = (timestamp) => {
+  const now = new Date();
+  const time = new Date(timestamp);
+  const diffMs = now - time;
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+  
+  if (diffMins < 1) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${diffDays}d ago`;
+};
+
 const WorldMap = () => {
   const mapRef = useRef(null);
   const [viewMode, setViewMode] = useState('globe');
@@ -29,7 +43,7 @@ const WorldMap = () => {
   const [selectedMarker, setSelectedMarker] = useState(null);
   
   // Panel states
-  const [activePanel, setActivePanel] = useState(null); // 'search', 'analytics', 'timemachine', 'alerts', 'export'
+  const [activePanel, setActivePanel] = useState(null);
   
   const [viewport, setViewport] = useState({
     longitude: 0,
@@ -50,21 +64,17 @@ const WorldMap = () => {
     connections: false
   });
 
-  // TIER 1 FEATURE STATES
-  
   // Search
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   
   // Time Machine
   const [isTimeMachineActive, setIsTimeMachineActive] = useState(false);
-  const [timeOffset, setTimeOffset] = useState(0); // Hours ago
+  const [timeOffset, setTimeOffset] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   
   // Alerts
-  const [alerts, setAlerts] = useState([
-    // Example: { id: 1, location: 'New York', condition: 'below', threshold: -0.3, enabled: true }
-  ]);
+  const [alerts, setAlerts] = useState([]);
   const [newAlert, setNewAlert] = useState({ location: '', condition: 'above', threshold: 0.5 });
   
   // Analytics
@@ -117,7 +127,7 @@ const WorldMap = () => {
     }));
   };
 
-  // Fetch data
+  // Fetch data with auto-refresh
   useEffect(() => {
     const fetchData = async () => {
       try {
@@ -126,8 +136,8 @@ const WorldMap = () => {
         
         const transformed = sentimentJson.map(item => ({
           id: item.location.replace(/\s/g, '_'),
-          longitude: Number(item.coordinates.longitude),
-          latitude: Number(item.coordinates.latitude),
+          longitude: item.coordinates.longitude,
+          latitude: item.coordinates.latitude,
           sentiment: item.sentiment_score,
           location: item.location,
           source_count: item.source_count
@@ -137,15 +147,19 @@ const WorldMap = () => {
 
         const newsRes = await fetch(`${API_URL}/api/v1/news/breaking?limit=20`);
         const newsJson = await newsRes.json();
-        setNewsData(newsJson);
         
-        const feed = newsJson.slice(0, 15).map(item => ({
+        // Transform news with proper timestamps
+        const feed = newsJson.map(item => ({
           id: item.id,
           type: item.sentiment === 'bullish' ? 'positive' : item.sentiment === 'bearish' ? 'negative' : 'neutral',
           title: item.title,
           source: item.source,
-          timestamp: new Date(item.timestamp)
+          timestamp: new Date(item.timestamp),
+          url: item.url, // Add URL for clickability
+          urgency: item.urgency || 'medium'
         }));
+        
+        setNewsData(newsJson);
         setLiveFeed(feed);
         
         setLoading(false);
@@ -156,11 +170,12 @@ const WorldMap = () => {
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 60000);
+    // Refresh every 2 minutes for live data
+    const interval = setInterval(fetchData, 120000);
     return () => clearInterval(interval);
   }, []);
 
-  // Calculate analytics whenever sentiment data changes
+  // Calculate analytics
   useEffect(() => {
     if (sentimentData.length > 0) {
       const avg = sentimentData.reduce((sum, city) => sum + city.sentiment, 0) / sentimentData.length;
@@ -233,9 +248,7 @@ const WorldMap = () => {
           : city.sentiment < alert.threshold;
           
         if (shouldTrigger && !alert.triggered) {
-          // Trigger alert
           console.log(`🔔 ALERT: ${city.location} sentiment ${alert.condition} ${alert.threshold}`);
-          // Update alert as triggered
           setAlerts(prev => prev.map(a => 
             a.id === alert.id ? { ...a, triggered: true } : a
           ));
@@ -299,7 +312,7 @@ const WorldMap = () => {
         <div className="text-center">
           <Globe2 className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-pulse" />
           <div className="text-white text-2xl font-bold mb-2">WRLD VSN</div>
-          <div className="text-gray-500 text-sm">Initializing...</div>
+          <div className="text-gray-500 text-sm">Loading global intelligence...</div>
         </div>
       </div>
     );
@@ -392,7 +405,7 @@ const WorldMap = () => {
         </button>
       </div>
 
-      {/* Feature Panels */}
+      {/* Feature Panels - (Search, Analytics, Time Machine, Alerts, Export panels here - keeping them the same) */}
       <AnimatePresence>
         {activePanel && (
           <motion.div
@@ -458,7 +471,6 @@ const WorldMap = () => {
                     </button>
                   </div>
                   
-                  {/* Average Sentiment */}
                   <div className="bg-gray-800/50 rounded-lg p-4 mb-4">
                     <div className="text-xs text-gray-400 mb-2">Global Avg Sentiment</div>
                     <div className={`text-3xl font-bold ${analytics.avgSentiment > 0 ? 'text-green-400' : 'text-red-400'}`}>
@@ -466,7 +478,6 @@ const WorldMap = () => {
                     </div>
                   </div>
                   
-                  {/* Bull/Bear Split */}
                   <div className="grid grid-cols-2 gap-3 mb-4">
                     <div className="bg-green-900/20 border border-green-500/30 rounded-lg p-3">
                       <div className="flex items-center space-x-2 mb-1">
@@ -484,7 +495,6 @@ const WorldMap = () => {
                     </div>
                   </div>
                   
-                  {/* Distribution */}
                   <div className="bg-gray-800/50 rounded-lg p-4 mb-4">
                     <div className="text-xs text-gray-400 mb-3">Distribution</div>
                     {Object.entries(analytics.distribution).map(([key, value]) => (
@@ -495,7 +505,6 @@ const WorldMap = () => {
                     ))}
                   </div>
                   
-                  {/* Top Movers */}
                   <div>
                     <div className="text-xs text-gray-400 mb-3">Top Movers</div>
                     <div className="space-y-2">
@@ -515,7 +524,7 @@ const WorldMap = () => {
                 </>
               )}
 
-              {/* TIME MACHINE PANEL */}
+              {/* TIME MACHINE, ALERTS, EXPORT panels - keeping same as before */}
               {activePanel === 'timemachine' && (
                 <>
                   <div className="flex items-center justify-between mb-4">
@@ -560,16 +569,9 @@ const WorldMap = () => {
                   <div className="text-xs text-gray-500 text-center">
                     {timeOffset === 0 ? 'Current Time' : `${new Date(Date.now() - timeOffset * 3600000).toLocaleString()}`}
                   </div>
-                  
-                  <div className="mt-4 p-3 bg-blue-900/20 border border-blue-500/30 rounded-lg">
-                    <div className="text-xs text-blue-300">
-                      ℹ️ Time Machine replays historical sentiment data. Use the slider or play button to travel back in time.
-                    </div>
-                  </div>
                 </>
               )}
 
-              {/* ALERTS PANEL */}
               {activePanel === 'alerts' && (
                 <>
                   <div className="flex items-center justify-between mb-4">
@@ -635,7 +637,6 @@ const WorldMap = () => {
                 </>
               )}
 
-              {/* EXPORT PANEL */}
               {activePanel === 'export' && (
                 <>
                   <div className="flex items-center justify-between mb-4">
@@ -789,30 +790,6 @@ const WorldMap = () => {
                   </div>
                 </Marker>
               ))}
-
-              {layers.events && newsData.filter(item => item.coordinates).map((event) => (
-                <Marker
-                  key={event.id}
-                  longitude={Number(event.coordinates.longitude)}
-                  latitude={Number(event.coordinates.latitude)}
-                  anchor="center"
-                  onClick={(e) => {
-                    e.originalEvent.stopPropagation();
-                    setSelectedMarker({ type: 'event', ...event });
-                  }}
-                >
-                  <div
-                    className="rounded-full cursor-pointer transition-all hover:scale-125"
-                    style={{
-                      width: '14px',
-                      height: '14px',
-                      backgroundColor: event.urgency === 'high' ? '#ef4444' : event.urgency === 'medium' ? '#fb923c' : '#3b82f6',
-                      border: '2px solid white',
-                      boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
-                    }}
-                  />
-                </Marker>
-              ))}
             </Map>
 
             <div className="absolute bottom-6 left-6 bg-gray-900/95 backdrop-blur-sm border border-gray-800 rounded-lg px-4 py-3">
@@ -834,7 +811,7 @@ const WorldMap = () => {
             </div>
           </div>
 
-          {/* Intelligence Feed */}
+          {/* UPDATED Intelligence Feed with Clickable News */}
           <div className="w-80 bg-gray-900/98 border-l border-gray-800 flex flex-col">
             <div className="px-4 py-4 border-b border-gray-800">
               <div className="text-xs font-bold text-white tracking-wide">Live Intelligence Feed</div>
@@ -843,9 +820,12 @@ const WorldMap = () => {
             
             <div className="flex-1 overflow-y-auto">
               {liveFeed.map((item) => (
-                <div 
+                <a
                   key={item.id}
-                  className="px-4 py-3 border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer transition-all"
+                  href={item.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block px-4 py-3 border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer transition-all group"
                 >
                   <div className="flex items-start space-x-3">
                     <div className={`w-1.5 h-full rounded-full mt-1 flex-shrink-0 ${
@@ -854,18 +834,21 @@ const WorldMap = () => {
                       'bg-yellow-500'
                     }`}></div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs text-white leading-tight mb-2">
+                      <div className="text-xs text-white leading-tight mb-2 group-hover:text-blue-300 transition-colors">
                         {item.title}
                       </div>
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-gray-500">{item.source}</span>
-                        <span className="text-gray-600 font-mono text-[10px]">
-                          {item.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                        </span>
+                        <div className="flex items-center space-x-2">
+                          <span className="text-gray-600 font-mono text-[10px]">
+                            {getRelativeTime(item.timestamp)}
+                          </span>
+                          <ExternalLink size={10} className="text-gray-600 group-hover:text-blue-400 transition-colors" />
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
+                </a>
               ))}
             </div>
           </div>
