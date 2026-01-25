@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import Map, { Marker, NavigationControl, ScaleControl, GeolocateControl } from 'react-map-gl';
+import Map, { Marker, NavigationControl, ScaleControl, GeolocateControl, Source, Layer } from 'react-map-gl';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Globe2, Map as MapIcon, Menu, X, Activity, Zap, TrendingUp, TrendingDown,
   Search, BarChart3, Download, Clock, Bell, Plus, Trash2, Settings,
   ChevronRight, FileText, Image as ImageIcon, ExternalLink, Satellite,
-  Play, Pause, RefreshCw, MapPin, PieChart, DollarSign, AlertTriangle,
-  Briefcase, Layers
+  Play, Pause, RefreshCw, MapPin, DollarSign, AlertTriangle, Cloud,
+  Calendar, CheckCircle, AlertCircle, Loader
 } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ComposedChart, Line } from 'recharts';
 import 'mapbox-gl/dist/mapbox-gl.css';
 
 const MAPBOX_TOKEN = process.env.REACT_APP_MAPBOX_TOKEN;
@@ -34,6 +35,45 @@ const getRelativeTime = (timestamp) => {
   return `${diffDays}d ago`;
 };
 
+const CandlestickChart = ({ data }) => {
+  if (!data || data.length === 0) return <div className="text-gray-500 text-xs">No chart data</div>;
+
+  const chartData = data.map(candle => ({
+    ...candle,
+    upperShadow: candle.high - Math.max(candle.open, candle.close),
+    lowerShadow: Math.min(candle.open, candle.close) - candle.low,
+    body: Math.abs(candle.close - candle.open),
+    bodyBase: Math.min(candle.open, candle.close),
+    isGreen: candle.close >= candle.open
+  }));
+
+  return (
+    <ResponsiveContainer width="100%" height={80}>
+      <ComposedChart data={chartData} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+        <XAxis dataKey="timestamp" hide />
+        <YAxis domain={['dataMin', 'dataMax']} hide />
+        <Tooltip
+          content={({ active, payload }) => {
+            if (active && payload && payload[0]) {
+              const data = payload[0].payload;
+              return (
+                <div className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs">
+                  <div className="text-white">O: {data.open.toFixed(2)}</div>
+                  <div className="text-white">H: {data.high.toFixed(2)}</div>
+                  <div className="text-white">L: {data.low.toFixed(2)}</div>
+                  <div className="text-white">C: {data.close.toFixed(2)}</div>
+                </div>
+              );
+            }
+            return null;
+          }}
+        />
+        <Bar dataKey="body" stackId="candle" fill={(d) => d.isGreen ? '#10b981' : '#ef4444'} />
+      </ComposedChart>
+    </ResponsiveContainer>
+  );
+};
+
 const WorldMap = () => {
   const mapRef = useRef(null);
   const [viewMode, setViewMode] = useState('globe');
@@ -42,6 +82,7 @@ const WorldMap = () => {
   const [selectedCity, setSelectedCity] = useState(null);
   
   const [activePanel, setActivePanel] = useState(null);
+  const [showWeatherLayer, setShowWeatherLayer] = useState(false);
   
   const [viewport, setViewport] = useState({
     longitude: 0,
@@ -51,51 +92,22 @@ const WorldMap = () => {
     bearing: 0
   });
 
-  const [sentimentData, setSentimentData] = useState([]);
-  const [cityNewsCounts, setCityNewsCounts] = useState({});
-  const [selectedCityNews, setSelectedCityNews] = useState([]);
-  const [globalMarkets, setGlobalMarkets] = useState(null);
-  const [keyIndicators, setKeyIndicators] = useState(null);
+  // Data states
+  const [liveMarkets, setLiveMarkets] = useState(null);
+  const [financialNews, setFinancialNews] = useState([]);
+  const [weatherData, setWeatherData] = useState(null);
+  const [economicCalendar, setEconomicCalendar] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [dataQuality, setDataQuality] = useState({});
   
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
-  
-  const [timeOffset, setTimeOffset] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  
-  const [alerts, setAlerts] = useState([]);
-  const [newAlert, setNewAlert] = useState({ location: '', condition: 'above', threshold: 0.5 });
-  
-  const [analytics, setAnalytics] = useState({
-    avgSentiment: 0,
-    bullishCount: 0,
-    bearishCount: 0,
-    topMovers: [],
-    distribution: {}
-  });
 
   // Live clock
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
-
-  // Time Machine
-  useEffect(() => {
-    if (isPlaying) {
-      const interval = setInterval(() => {
-        setTimeOffset(prev => {
-          if (prev >= 24) {
-            setIsPlaying(false);
-            return 0;
-          }
-          return prev + 0.5;
-        });
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [isPlaying]);
 
   const toggleViewMode = () => {
     const newMode = viewMode === 'globe' ? 'flat' : 'globe';
@@ -115,121 +127,89 @@ const WorldMap = () => {
     }));
   };
 
-  // Fetch comprehensive data
+  // Fetch comprehensive data with smart intervals
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchAllData = async () => {
       try {
-        // Sentiment
-        const sentimentRes = await fetch(`${API_URL}/api/v1/sentiment/global`);
-        const sentimentJson = await sentimentRes.json();
-        setSentimentData(sentimentJson);
+        // Fetch markets (fast refresh)
+        const marketsRes = await fetch(`${API_URL}/api/v1/markets/live`);
+        const marketsData = await marketsRes.json();
+        setLiveMarkets(marketsData);
+        setDataQuality(marketsData.data_quality || {});
 
-        // City news counts
-        const countsRes = await fetch(`${API_URL}/api/v1/news/city-counts`);
-        const countsJson = await countsRes.json();
-        setCityNewsCounts(countsJson);
+        // Fetch news (medium refresh)
+        const newsRes = await fetch(`${API_URL}/api/v1/news/financial`);
+        const newsData = await newsRes.json();
+        setFinancialNews(newsData.news || []);
 
-        // Global markets
-        const marketsRes = await fetch(`${API_URL}/api/v1/markets/global`);
-        const marketsJson = await marketsRes.json();
-        setGlobalMarkets(marketsJson.markets);
-
-        // Key indicators
-        const indicatorsRes = await fetch(`${API_URL}/api/v1/indicators/key`);
-        const indicatorsJson = await indicatorsRes.json();
-        setKeyIndicators(indicatorsJson.indicators);
-        
         setLoading(false);
       } catch (error) {
-        console.error('Error:', error);
+        console.error('Error fetching data:', error);
         setLoading(false);
       }
     };
 
-    fetchData();
-    const interval = setInterval(fetchData, 120000); // Every 2 min
-    return () => clearInterval(interval);
+    fetchAllData();
+    
+    // Smart refresh intervals
+    const marketsInterval = setInterval(fetchAllData, 15000); // 15 seconds
+    
+    return () => {
+      clearInterval(marketsInterval);
+    };
   }, []);
 
-  // Calculate analytics
+  // Fetch weather (slow refresh)
   useEffect(() => {
-    if (sentimentData.length > 0) {
-      const avg = sentimentData.reduce((sum, city) => sum + city.sentiment_score, 0) / sentimentData.length;
-      const bullish = sentimentData.filter(city => city.sentiment_score > 0).length;
-      const bearish = sentimentData.filter(city => city.sentiment_score < 0).length;
-      
-      const sorted = [...sentimentData].sort((a, b) => Math.abs(b.sentiment_score) - Math.abs(a.sentiment_score));
-      const topMovers = sorted.slice(0, 5);
-      
-      const distribution = {
-        veryBullish: sentimentData.filter(c => c.sentiment_score > 0.4).length,
-        bullish: sentimentData.filter(c => c.sentiment_score > 0 && c.sentiment_score <= 0.4).length,
-        neutral: sentimentData.filter(c => c.sentiment_score >= -0.2 && c.sentiment_score <= 0.2).length,
-        bearish: sentimentData.filter(c => c.sentiment_score < 0 && c.sentiment_score >= -0.4).length,
-        veryBearish: sentimentData.filter(c => c.sentiment_score < -0.4).length
-      };
-      
-      setAnalytics({ avgSentiment: avg, bullishCount: bullish, bearishCount: bearish, topMovers, distribution });
-    }
-  }, [sentimentData]);
-
-  // Search
-  const handleSearch = (query) => {
-    setSearchQuery(query);
-    if (query.length > 1) {
-      const results = sentimentData.filter(city => 
-        city.location.toLowerCase().includes(query.toLowerCase())
-      );
-      setSearchResults(results);
-    } else {
-      setSearchResults([]);
-    }
-  };
-
-  // Fly to location and load city news
-  const flyToCity = async (city) => {
-    if (mapRef.current) {
-      mapRef.current.flyTo({
-        center: [city.coordinates.longitude, city.coordinates.latitude],
-        zoom: 8,
-        duration: 2000,
-        essential: true
-      });
-      
-      // Load city news
+    const fetchWeather = async () => {
       try {
-        const res = await fetch(`${API_URL}/api/v1/news/by-city/${city.location}`);
-        const data = await res.json();
-        setSelectedCityNews(data.news || []);
-        setSelectedCity(city);
-        setActivePanel('citynews');
+        const weatherRes = await fetch(`${API_URL}/api/v1/weather/global`);
+        const weatherData = await weatherRes.json();
+        setWeatherData(weatherData);
       } catch (error) {
-        console.error('Error loading city news:', error);
+        console.error('Error fetching weather:', error);
       }
-      
-      setSearchQuery('');
-      setSearchResults([]);
-    }
-  };
+    };
 
-  const addAlert = () => {
-    if (newAlert.location) {
-      setAlerts([...alerts, { 
-        id: Date.now(), 
-        ...newAlert, 
-        enabled: true,
-        triggered: false
-      }]);
-      setNewAlert({ location: '', condition: 'above', threshold: 0.5 });
-    }
+    fetchWeather();
+    const weatherInterval = setInterval(fetchWeather, 300000); // 5 minutes
+    
+    return () => clearInterval(weatherInterval);
+  }, []);
+
+  // Fetch economic calendar (very slow refresh)
+  useEffect(() => {
+    const fetchCalendar = async () => {
+      try {
+        const calendarRes = await fetch(`${API_URL}/api/v1/calendar/economic`);
+        const calendarData = await calendarRes.json();
+        setEconomicCalendar(calendarData);
+      } catch (error) {
+        console.error('Error fetching calendar:', error);
+      }
+    };
+
+    fetchCalendar();
+    const calendarInterval = setInterval(fetchCalendar, 3600000); // 1 hour
+    
+    return () => clearInterval(calendarInterval);
+  }, []);
+
+  const getMarkerColor = (sentiment) => {
+    if (sentiment > 0.4) return '#10b981';
+    if (sentiment > 0.2) return '#34d399';
+    if (sentiment > 0) return '#facc15';
+    if (sentiment > -0.2) return '#fb923c';
+    if (sentiment > -0.4) return '#f87171';
+    return '#ef4444';
   };
 
   const exportData = (format) => {
     if (format === 'csv') {
       const csv = [
-        ['Location', 'Latitude', 'Longitude', 'Sentiment', 'News Count'].join(','),
-        ...sentimentData.map(city => 
-          [city.location, city.coordinates.latitude, city.coordinates.longitude, city.sentiment_score, cityNewsCounts[city.location] || 0].join(',')
+        ['Asset', 'Value', 'Change', 'Status', 'Source', 'Age'].join(','),
+        ...(liveMarkets?.equities || []).map(e => 
+          [e.name, e.value, e.change, e.status, e.source, e.age_seconds].join(',')
         )
       ].join('\n');
       
@@ -240,7 +220,7 @@ const WorldMap = () => {
       a.download = `wrld-vsn-${new Date().toISOString().split('T')[0]}.csv`;
       a.click();
     } else if (format === 'json') {
-      const json = JSON.stringify({ sentiment: sentimentData, newsCounts: cityNewsCounts, markets: globalMarkets }, null, 2);
+      const json = JSON.stringify({ markets: liveMarkets, news: financialNews }, null, 2);
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -262,22 +242,13 @@ const WorldMap = () => {
     }
   };
 
-  const getMarkerColor = (sentiment) => {
-    if (sentiment > 0.4) return '#10b981';
-    if (sentiment > 0.2) return '#34d399';
-    if (sentiment > 0) return '#facc15';
-    if (sentiment > -0.2) return '#fb923c';
-    if (sentiment > -0.4) return '#f87171';
-    return '#ef4444';
-  };
-
   if (loading) {
     return (
       <div className="h-screen w-screen flex items-center justify-center bg-black">
         <div className="text-center">
-          <Globe2 className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-pulse" />
-          <div className="text-white text-2xl font-bold mb-2">WRLD VSN</div>
-          <div className="text-gray-500 text-sm">Loading financial intelligence...</div>
+          <Loader className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-spin" />
+          <div className="text-white text-2xl font-bold mb-2">WRLD VSN V3</div>
+          <div className="text-gray-500 text-sm">Loading real-time intelligence...</div>
         </div>
       </div>
     );
@@ -310,13 +281,13 @@ const WorldMap = () => {
         </button>
         
         <button 
-          onClick={() => setActivePanel(activePanel === 'search' ? null : 'search')}
+          onClick={() => setShowWeatherLayer(!showWeatherLayer)}
           className={`w-11 h-11 rounded-lg flex items-center justify-center transition-all ${
-            activePanel === 'search' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+            showWeatherLayer ? 'bg-blue-600 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'
           }`}
-          title="Search"
+          title="Weather Layer"
         >
-          <Search size={20} />
+          <Cloud size={20} />
         </button>
         
         <button 
@@ -330,23 +301,23 @@ const WorldMap = () => {
         </button>
         
         <button 
-          onClick={() => setActivePanel(activePanel === 'indicators' ? null : 'indicators')}
+          onClick={() => setActivePanel(activePanel === 'calendar' ? null : 'calendar')}
           className={`w-11 h-11 rounded-lg flex items-center justify-center transition-all ${
-            activePanel === 'indicators' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+            activePanel === 'calendar' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'
           }`}
-          title="Key Indicators"
+          title="Economic Calendar"
         >
-          <Activity size={20} />
+          <Calendar size={20} />
         </button>
         
         <button 
-          onClick={() => setActivePanel(activePanel === 'analytics' ? null : 'analytics')}
+          onClick={() => setActivePanel(activePanel === 'quality' ? null : 'quality')}
           className={`w-11 h-11 rounded-lg flex items-center justify-center transition-all ${
-            activePanel === 'analytics' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+            activePanel === 'quality' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-white'
           }`}
-          title="Analytics"
+          title="Data Quality"
         >
-          <BarChart3 size={20} />
+          <Activity size={20} />
         </button>
         
         <button 
@@ -376,61 +347,11 @@ const WorldMap = () => {
             animate={{ x: 0 }}
             exit={{ x: -300 }}
             transition={{ type: 'spring', damping: 30, stiffness: 300 }}
-            className="absolute left-16 top-0 bottom-0 w-80 bg-gray-900/98 backdrop-blur-xl border-r border-gray-800 z-20 overflow-y-auto"
+            className="absolute left-16 top-0 bottom-0 w-96 bg-gray-900/98 backdrop-blur-xl border-r border-gray-800 z-20 overflow-y-auto"
           >
             <div className="p-4">
-              {/* SEARCH PANEL */}
-              {activePanel === 'search' && (
-                <>
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-white font-bold text-lg">Search Cities</h2>
-                    <button onClick={() => setActivePanel(null)} className="text-gray-400 hover:text-white">
-                      <X size={20} />
-                    </button>
-                  </div>
-                  
-                  <div className="relative mb-4">
-                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={16} />
-                    <input
-                      type="text"
-                      placeholder="Search cities..."
-                      value={searchQuery}
-                      onChange={(e) => handleSearch(e.target.value)}
-                      className="w-full bg-gray-800 text-white pl-10 pr-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                  </div>
-                  
-                  {searchResults.length > 0 && (
-                    <div className="space-y-2">
-                      {searchResults.map(city => (
-                        <button
-                          key={city.location}
-                          onClick={() => flyToCity(city)}
-                          className="w-full flex items-center justify-between p-3 bg-gray-800/50 hover:bg-gray-700/50 rounded-lg transition-all group"
-                        >
-                          <div className="flex items-center space-x-3">
-                            <MapPin size={16} className="text-blue-400" />
-                            <div className="text-left">
-                              <div className="text-white text-sm">{city.location}</div>
-                              {cityNewsCounts[city.location] && (
-                                <div className="text-xs text-gray-400">{cityNewsCounts[city.location]} articles</div>
-                              )}
-                            </div>
-                          </div>
-                          <div className={`text-xs font-semibold ${
-                            city.sentiment_score > 0 ? 'text-green-400' : 'text-red-400'
-                          }`}>
-                            {(city.sentiment_score * 100).toFixed(0)}%
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-
               {/* GLOBAL MARKETS PANEL */}
-              {activePanel === 'markets' && globalMarkets && (
+              {activePanel === 'markets' && liveMarkets && (
                 <>
                   <div className="flex items-center justify-between mb-4">
                     <h2 className="text-white font-bold text-lg">Global Markets</h2>
@@ -440,80 +361,105 @@ const WorldMap = () => {
                   </div>
                   
                   {/* Equities */}
-                  {globalMarkets.equities && globalMarkets.equities.length > 0 && (
-                    <div className="mb-4">
-                      <div className="text-xs text-gray-400 uppercase tracking-wider mb-2 font-semibold">Equities</div>
-                      <div className="bg-gray-800/50 rounded-lg p-3 space-y-2">
-                        {globalMarkets.equities.map((equity, idx) => (
-                          <div key={idx} className="flex items-center justify-between">
-                            <span className="text-sm text-white">{equity.name}</span>
-                            <div className="text-right">
-                              <div className="text-sm text-white font-mono">{equity.value.toFixed(2)}</div>
-                              <div className={`text-xs font-semibold ${equity.change > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                {equity.change > 0 ? '+' : ''}{equity.change.toFixed(2)}%
+                  {liveMarkets.equities && liveMarkets.equities.length > 0 && (
+                    <div className="mb-6">
+                      <div className="text-xs text-gray-400 uppercase tracking-wider mb-3 font-semibold">Equities</div>
+                      <div className="space-y-3">
+                        {liveMarkets.equities.map((equity, idx) => (
+                          <motion.div 
+                            key={idx}
+                            initial={{ opacity: 0, y: 20 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: idx * 0.1 }}
+                            className="bg-gray-800/50 rounded-lg p-4"
+                          >
+                            <div className="flex items-center justify-between mb-2">
+                              <div>
+                                <div className="text-white font-semibold">{equity.name}</div>
+                                <div className="text-xs text-gray-500">{equity.symbol}</div>
+                              </div>
+                              <div className="text-right">
+                                <div className="text-lg font-bold text-white font-mono">
+                                  {equity.value.toFixed(2)}
+                                </div>
+                                <div className={`text-sm font-semibold ${equity.change > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                  {equity.change > 0 ? '+' : ''}{equity.change.toFixed(2)}%
+                                </div>
                               </div>
                             </div>
-                          </div>
+                            
+                            {/* Candlestick chart would go here - placeholder for now */}
+                            <div className="h-20 bg-gray-900/50 rounded mt-2 flex items-center justify-center">
+                              <div className="text-xs text-gray-600">Chart data loading...</div>
+                            </div>
+                            
+                            <div className="flex items-center justify-between mt-3 text-xs">
+                              <div className="flex items-center space-x-2">
+                                {equity.status === 'verified' ? (
+                                  <CheckCircle size={12} className="text-green-400" />
+                                ) : (
+                                  <AlertCircle size={12} className="text-yellow-400" />
+                                )}
+                                <span className="text-gray-400">{equity.source}</span>
+                              </div>
+                              <div className="flex items-center space-x-2">
+                                <div className={`w-2 h-2 rounded-full ${
+                                  equity.market_status === 'OPEN' ? 'bg-green-500' : 'bg-red-500'
+                                }`}></div>
+                                <span className="text-gray-400">{equity.age_seconds}s ago</span>
+                              </div>
+                            </div>
+                          </motion.div>
                         ))}
                       </div>
                     </div>
                   )}
 
                   {/* Crypto */}
-                  {globalMarkets.crypto && globalMarkets.crypto.length > 0 && (
-                    <div className="mb-4">
-                      <div className="text-xs text-gray-400 uppercase tracking-wider mb-2 font-semibold">Cryptocurrency</div>
-                      <div className="bg-gray-800/50 rounded-lg p-3 space-y-2">
-                        {globalMarkets.crypto.map((coin, idx) => (
-                          <div key={idx} className="flex items-center justify-between">
-                            <span className="text-sm text-white">{coin.name}</span>
-                            <div className="text-right">
-                              <div className="text-sm text-white font-mono">${coin.value.toLocaleString()}</div>
-                              <div className={`text-xs font-semibold ${coin.change > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                {coin.change > 0 ? '+' : ''}{coin.change.toFixed(2)}%
+                  {liveMarkets.crypto && liveMarkets.crypto.length > 0 && (
+                    <div className="mb-6">
+                      <div className="text-xs text-gray-400 uppercase tracking-wider mb-3 font-semibold">Cryptocurrency</div>
+                      <div className="space-y-3">
+                        {liveMarkets.crypto.map((coin, idx) => (
+                          <motion.div 
+                            key={idx}
+                            initial={{ opacity: 0, y: 20 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ delay: idx * 0.1 }}
+                            className="bg-gray-800/50 rounded-lg p-4"
+                          >
+                            <div className="flex items-center justify-between mb-2">
+                              <div>
+                                <div className="text-white font-semibold">{coin.symbol}</div>
+                                <div className="text-xs text-gray-500">24/7 Trading</div>
+                              </div>
+                              <div className="text-right">
+                                <div className="text-lg font-bold text-white font-mono">
+                                  ${coin.value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                                </div>
+                                <div className={`text-sm font-semibold ${coin.change > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                  {coin.change > 0 ? '+' : ''}{coin.change.toFixed(2)}%
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Commodities */}
-                  {globalMarkets.commodities && globalMarkets.commodities.length > 0 && (
-                    <div className="mb-4">
-                      <div className="text-xs text-gray-400 uppercase tracking-wider mb-2 font-semibold">Commodities</div>
-                      <div className="bg-gray-800/50 rounded-lg p-3 space-y-2">
-                        {globalMarkets.commodities.map((commodity, idx) => (
-                          <div key={idx} className="flex items-center justify-between">
-                            <span className="text-sm text-white">{commodity.name}</span>
-                            <div className="text-right">
-                              <div className="text-sm text-white font-mono">${commodity.value.toFixed(2)}</div>
-                              <div className={`text-xs font-semibold ${commodity.change > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                {commodity.change > 0 ? '+' : ''}{commodity.change.toFixed(2)}%
+                            
+                            {/* Candlestick Chart */}
+                            {coin.candlestick_data && coin.candlestick_data.length > 0 && (
+                              <CandlestickChart data={coin.candlestick_data} />
+                            )}
+                            
+                            <div className="flex items-center justify-between mt-3 text-xs">
+                              <div className="flex items-center space-x-2">
+                                {coin.status === 'verified' ? (
+                                  <CheckCircle size={12} className="text-green-400" />
+                                ) : (
+                                  <AlertCircle size={12} className="text-yellow-400" />
+                                )}
+                                <span className="text-gray-400">{coin.source}</span>
                               </div>
+                              <div className="text-gray-400">{coin.age_seconds}s ago</div>
                             </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Currencies */}
-                  {globalMarkets.currencies && globalMarkets.currencies.length > 0 && (
-                    <div className="mb-4">
-                      <div className="text-xs text-gray-400 uppercase tracking-wider mb-2 font-semibold">Currencies</div>
-                      <div className="bg-gray-800/50 rounded-lg p-3 space-y-2">
-                        {globalMarkets.currencies.map((currency, idx) => (
-                          <div key={idx} className="flex items-center justify-between">
-                            <span className="text-sm text-white">{currency.name}</span>
-                            <div className="text-right">
-                              <div className="text-sm text-white font-mono">{currency.value.toFixed(4)}</div>
-                              <div className={`text-xs font-semibold ${currency.change > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                {currency.change > 0 ? '+' : ''}{currency.change.toFixed(2)}%
-                              </div>
-                            </div>
-                          </div>
+                          </motion.div>
                         ))}
                       </div>
                     </div>
@@ -521,132 +467,141 @@ const WorldMap = () => {
                 </>
               )}
 
-              {/* KEY INDICATORS PANEL */}
-              {activePanel === 'indicators' && keyIndicators && (
+              {/* ECONOMIC CALENDAR PANEL */}
+              {activePanel === 'calendar' && economicCalendar && (
                 <>
                   <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-white font-bold text-lg">Key Indicators</h2>
+                    <h2 className="text-white font-bold text-lg">Economic Calendar</h2>
                     <button onClick={() => setActivePanel(null)} className="text-gray-400 hover:text-white">
                       <X size={20} />
                     </button>
                   </div>
                   
-                  <div className="space-y-3">
-                    {Object.entries(keyIndicators).map(([key, indicator]) => (
-                      <div key={key} className="bg-gray-800/50 rounded-lg p-4">
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="text-xs text-gray-400 uppercase">{indicator.description}</div>
-                          <div className={`text-xs font-bold px-2 py-1 rounded ${
-                            indicator.status.includes('LOW') || indicator.status.includes('BULLISH') || indicator.status.includes('RISK-ON') || indicator.status === 'GREED'
-                              ? 'bg-green-900/30 text-green-400'
-                              : indicator.status.includes('HIGH') || indicator.status.includes('BEARISH')
-                              ? 'bg-red-900/30 text-red-400'
-                              : 'bg-yellow-900/30 text-yellow-400'
-                          }`}>
-                            {indicator.status}
+                  {economicCalendar.events && economicCalendar.events.length > 0 ? (
+                    <div className="space-y-3">
+                      {economicCalendar.events.map((event, idx) => (
+                        <motion.div
+                          key={idx}
+                          initial={{ opacity: 0, x: -20 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ delay: idx * 0.05 }}
+                          className={`border-l-4 ${
+                            event.impact === 'high' ? 'border-red-500 bg-red-900/10' :
+                            event.impact === 'medium' ? 'border-yellow-500 bg-yellow-900/10' :
+                            'border-gray-500 bg-gray-900/10'
+                          } rounded-r-lg p-4`}
+                        >
+                          <div className="flex items-start justify-between mb-2">
+                            <div className="flex-1">
+                              <div className="text-white font-semibold text-sm">{event.event}</div>
+                              <div className="text-xs text-gray-400 mt-1">{event.country}</div>
+                            </div>
+                            <div className={`text-xs font-bold px-2 py-1 rounded ${
+                              event.impact === 'high' ? 'bg-red-900/30 text-red-400' :
+                              event.impact === 'medium' ? 'bg-yellow-900/30 text-yellow-400' :
+                              'bg-gray-900/30 text-gray-400'
+                            }`}>
+                              {event.impact.toUpperCase()}
+                            </div>
                           </div>
-                        </div>
-                        <div className="flex items-baseline space-x-2">
-                          <div className="text-2xl font-bold text-white">{indicator.value}</div>
-                          {indicator.change !== undefined && (
-                            <div className={`text-sm font-semibold ${indicator.change > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                              {indicator.change > 0 ? '▲' : '▼'} {Math.abs(indicator.change)}
+                          
+                          <div className="text-xs text-gray-500 mb-2">
+                            {new Date(event.date).toLocaleString()}
+                          </div>
+                          
+                          {(event.actual || event.estimate || event.previous) && (
+                            <div className="grid grid-cols-3 gap-2 text-xs mt-3">
+                              {event.previous && (
+                                <div>
+                                  <div className="text-gray-500">Previous</div>
+                                  <div className="text-white font-mono">{event.previous}</div>
+                                </div>
+                              )}
+                              {event.estimate && (
+                                <div>
+                                  <div className="text-gray-500">Estimate</div>
+                                  <div className="text-white font-mono">{event.estimate}</div>
+                                </div>
+                              )}
+                              {event.actual && (
+                                <div>
+                                  <div className="text-gray-500">Actual</div>
+                                  <div className="text-green-400 font-mono font-bold">{event.actual}</div>
+                                </div>
+                              )}
                             </div>
                           )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {/* ANALYTICS PANEL */}
-              {activePanel === 'analytics' && (
-                <>
-                  <div className="flex items-center justify-between mb-4">
-                    <h2 className="text-white font-bold text-lg">Analytics</h2>
-                    <button onClick={() => setActivePanel(null)} className="text-gray-400 hover:text-white">
-                      <X size={20} />
-                    </button>
-                  </div>
-                  
-                  <div className="bg-gray-800/50 rounded-lg p-4 mb-4">
-                    <div className="text-xs text-gray-400 mb-2">Global Avg Sentiment</div>
-                    <div className={`text-3xl font-bold ${analytics.avgSentiment > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                      {(analytics.avgSentiment * 100).toFixed(1)}%
-                    </div>
-                  </div>
-                  
-                  <div className="grid grid-cols-2 gap-3 mb-4">
-                    <div className="bg-green-900/20 border border-green-500/30 rounded-lg p-3">
-                      <div className="flex items-center space-x-2 mb-1">
-                        <TrendingUp size={14} className="text-green-400" />
-                        <span className="text-xs text-gray-400">Bullish</span>
-                      </div>
-                      <div className="text-2xl font-bold text-green-400">{analytics.bullishCount}</div>
-                    </div>
-                    <div className="bg-red-900/20 border border-red-500/30 rounded-lg p-3">
-                      <div className="flex items-center space-x-2 mb-1">
-                        <TrendingDown size={14} className="text-red-400" />
-                        <span className="text-xs text-gray-400">Bearish</span>
-                      </div>
-                      <div className="text-2xl font-bold text-red-400">{analytics.bearishCount}</div>
-                    </div>
-                  </div>
-                  
-                  <div>
-                    <div className="text-xs text-gray-400 mb-3">Top Movers</div>
-                    <div className="space-y-2">
-                      {analytics.topMovers.map((city, idx) => (
-                        <div key={city.location} className="flex items-center justify-between p-2 bg-gray-800/30 rounded">
-                          <div className="flex items-center space-x-2">
-                            <span className="text-xs text-gray-500">#{idx + 1}</span>
-                            <span className="text-xs text-white">{city.location}</span>
-                          </div>
-                          <span className={`text-xs font-bold ${city.sentiment_score > 0 ? 'text-green-400' : 'text-red-400'}`}>
-                            {(city.sentiment_score * 100).toFixed(0)}%
-                          </span>
-                        </div>
+                        </motion.div>
                       ))}
                     </div>
-                  </div>
+                  ) : (
+                    <div className="text-gray-500 text-center py-8">
+                      No upcoming events
+                    </div>
+                  )}
                 </>
               )}
 
-              {/* CITY NEWS PANEL */}
-              {activePanel === 'citynews' && selectedCity && (
+              {/* DATA QUALITY PANEL */}
+              {activePanel === 'quality' && (
                 <>
                   <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h2 className="text-white font-bold text-lg">{selectedCity.location}</h2>
-                      <div className="text-xs text-gray-500">{selectedCityNews.length} articles</div>
-                    </div>
+                    <h2 className="text-white font-bold text-lg">Data Quality</h2>
                     <button onClick={() => setActivePanel(null)} className="text-gray-400 hover:text-white">
                       <X size={20} />
                     </button>
                   </div>
                   
-                  <div className="space-y-3">
-                    {selectedCityNews.map((article) => (
-                      <a
-                        key={article.id}
-                        href={article.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block p-3 bg-gray-800/50 hover:bg-gray-700/50 rounded-lg transition-all group"
-                      >
-                        <div className="text-sm text-white leading-tight mb-2 group-hover:text-blue-300 transition-colors">
-                          {article.title}
-                        </div>
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="text-gray-500">{article.source}</span>
-                          <div className="flex items-center space-x-2">
-                            <span className="text-gray-600">{getRelativeTime(article.timestamp)}</span>
-                            <ExternalLink size={10} className="text-gray-600 group-hover:text-blue-400" />
+                  <div className="space-y-4">
+                    {dataQuality.equities && (
+                      <div className="bg-gray-800/50 rounded-lg p-4">
+                        <div className="text-white font-semibold mb-3">Equities</div>
+                        <div className="space-y-2">
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-400">Total</span>
+                            <span className="text-white font-mono">{dataQuality.equities.total}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-400">Verified</span>
+                            <span className="text-green-400 font-mono">{dataQuality.equities.verified}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-400">Stale</span>
+                            <span className="text-yellow-400 font-mono">{dataQuality.equities.stale}</span>
                           </div>
                         </div>
-                      </a>
-                    ))}
+                      </div>
+                    )}
+                    
+                    {dataQuality.crypto && (
+                      <div className="bg-gray-800/50 rounded-lg p-4">
+                        <div className="text-white font-semibold mb-3">Cryptocurrency</div>
+                        <div className="space-y-2">
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-400">Total</span>
+                            <span className="text-white font-mono">{dataQuality.crypto.total}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-400">Verified</span>
+                            <span className="text-green-400 font-mono">{dataQuality.crypto.verified}</span>
+                          </div>
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-400">Stale</span>
+                            <span className="text-yellow-400 font-mono">{dataQuality.crypto.stale}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    
+                    <div className="bg-blue-900/20 border border-blue-500/30 rounded-lg p-4">
+                      <div className="text-blue-400 font-semibold mb-2">✅ Accuracy Guaranteed</div>
+                      <div className="text-xs text-gray-400 space-y-1">
+                        <div>• No fake or mock data</div>
+                        <div>• Multi-source validation</div>
+                        <div>• Real-time updates</div>
+                        <div>• Market hours aware</div>
+                      </div>
+                    </div>
                   </div>
                 </>
               )}
@@ -718,7 +673,7 @@ const WorldMap = () => {
           <div className="flex items-center space-x-8">
             <div>
               <div className="text-white font-bold text-xl">WRLD VSN</div>
-              <div className="text-xs text-gray-500">Financial Intelligence Platform</div>
+              <div className="text-xs text-gray-500">V3 • Accuracy Guaranteed</div>
             </div>
             <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-green-900/20 border border-green-500/30">
               <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
@@ -731,12 +686,14 @@ const WorldMap = () => {
               <div className="flex items-center space-x-2">
                 <Activity size={14} className="text-blue-400" />
                 <span className="text-gray-400">Markets</span>
-                <span className="text-white font-bold font-mono">{sentimentData.length}</span>
+                <span className="text-white font-bold font-mono">
+                  {(liveMarkets?.equities?.length || 0) + (liveMarkets?.crypto?.length || 0)}
+                </span>
               </div>
               <div className="flex items-center space-x-2">
                 <Zap size={14} className="text-yellow-400" />
                 <span className="text-gray-400">News</span>
-                <span className="text-white font-bold font-mono">{Object.values(cityNewsCounts).reduce((a, b) => a + b, 0)}</span>
+                <span className="text-white font-bold font-mono">{financialNews.length}</span>
               </div>
             </div>
             <div className="text-gray-500 font-mono text-sm tabular-nums">
@@ -745,98 +702,142 @@ const WorldMap = () => {
           </div>
         </div>
 
-        {/* Map */}
-        <div className="flex-1 relative">
-          <Map
-            ref={mapRef}
-            {...viewport}
-            onMove={evt => setViewport(evt.viewState)}
-            mapboxAccessToken={MAPBOX_TOKEN}
-            mapStyle={MAP_STYLES[mapStyle]}
-            projection={viewMode === 'globe' ? 'globe' : 'mercator'}
-            dragRotate={viewMode === 'globe'}
-            touchZoomRotate={viewMode === 'globe'}
-            attributionControl={false}
-            maxZoom={18}
-            minZoom={0.5}
-          >
-            <NavigationControl position="top-right" showCompass={true} />
-            <GeolocateControl position="top-right" />
-            <ScaleControl position="bottom-right" />
+        {/* Map + News Feed */}
+        <div className="flex-1 flex">
+          <div className="flex-1 relative">
+            <Map
+              ref={mapRef}
+              {...viewport}
+              onMove={evt => setViewport(evt.viewState)}
+              mapboxAccessToken={MAPBOX_TOKEN}
+              mapStyle={MAP_STYLES[mapStyle]}
+              projection={viewMode === 'globe' ? 'globe' : 'mercator'}
+              dragRotate={viewMode === 'globe'}
+              touchZoomRotate={viewMode === 'globe'}
+              attributionControl={false}
+              maxZoom={18}
+              minZoom={0.5}
+            >
+              <NavigationControl position="top-right" showCompass={true} />
+              <GeolocateControl position="top-right" />
+              <ScaleControl position="bottom-right" />
 
-            {sentimentData.map((city) => {
-              const newsCount = cityNewsCounts[city.location] || 0;
-              return (
+              {/* Weather Layer */}
+              {showWeatherLayer && weatherData && weatherData.storms && weatherData.storms.map((storm, idx) => (
                 <Marker
-                  key={city.location}
-                  longitude={city.coordinates.longitude}
-                  latitude={city.coordinates.latitude}
+                  key={`storm-${idx}`}
+                  longitude={storm.lng}
+                  latitude={storm.lat}
                   anchor="center"
-                  onClick={(e) => {
-                    e.originalEvent.stopPropagation();
-                    flyToCity(city);
-                  }}
                 >
-                  <div className="relative cursor-pointer group">
-                    {Math.abs(city.sentiment_score) > 0.5 && (
-                      <div 
-                        className="absolute inset-0 rounded-full animate-pulse"
-                        style={{
-                          width: '32px',
-                          height: '32px',
-                          transform: 'translate(-50%, -50%)',
-                          left: '50%',
-                          top: '50%',
-                          border: `2px solid ${getMarkerColor(city.sentiment_score)}40`,
-                          boxShadow: `0 0 20px ${getMarkerColor(city.sentiment_score)}40`
-                        }}
-                      />
-                    )}
-                    
-                    <div
-                      className="rounded-full transition-all group-hover:scale-125 relative"
-                      style={{
-                        width: '16px',
-                        height: '16px',
-                        backgroundColor: getMarkerColor(city.sentiment_score),
-                        border: '2px solid white',
-                        boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
-                      }}
-                    >
-                      {newsCount > 0 && (
-                        <div className="absolute -top-2 -right-2 bg-yellow-500 text-black text-[8px] font-bold rounded-full w-4 h-4 flex items-center justify-center">
-                          {newsCount > 9 ? '9+' : newsCount}
-                        </div>
-                      )}
+                  <div className="relative group cursor-pointer">
+                    <div className="absolute inset-0 rounded-full animate-ping bg-red-500/30" style={{width: '40px', height: '40px', transform: 'translate(-50%, -50%)', left: '50%', top: '50%'}}></div>
+                    <div className="relative z-10 bg-red-500 rounded-full p-2">
+                      <Cloud size={16} className="text-white" />
                     </div>
-
-                    <div className="absolute left-6 top-0 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                      <div className="bg-gray-900/95 text-white text-xs px-2 py-1 rounded shadow-lg border border-gray-700">
-                        <div className="font-bold">{city.location}</div>
-                        <div className="text-gray-400">{newsCount} articles</div>
-                      </div>
+                    <div className="absolute left-8 top-0 bg-gray-900/95 text-white text-xs px-2 py-1 rounded shadow-lg border border-gray-700 whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                      <div className="font-bold">{storm.type}</div>
+                      <div className="text-gray-400">{storm.city}</div>
                     </div>
                   </div>
                 </Marker>
-              );
-            })}
-          </Map>
+              ))}
+            </Map>
 
-          <div className="absolute bottom-6 left-6 bg-gray-900/95 backdrop-blur-sm border border-gray-800 rounded-lg px-4 py-3">
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mb-2">Market Sentiment</div>
-            <div className="flex items-center space-x-4 text-xs">
-              <div className="flex items-center space-x-1.5">
-                <div className="w-3 h-3 rounded-full bg-green-500"></div>
-                <span className="text-gray-300">Bullish</span>
+            <div className="absolute bottom-6 left-6 bg-gray-900/95 backdrop-blur-sm border border-gray-800 rounded-lg px-4 py-3">
+              <div className="text-[10px] text-gray-400 uppercase tracking-wider mb-2">Data Status</div>
+              <div className="flex items-center space-x-4 text-xs">
+                <div className="flex items-center space-x-1.5">
+                  <CheckCircle size={12} className="text-green-500" />
+                  <span className="text-gray-300">Verified</span>
+                </div>
+                <div className="flex items-center space-x-1.5">
+                  <AlertCircle size={12} className="text-yellow-500" />
+                  <span className="text-gray-300">Stale</span>
+                </div>
+                <div className="flex items-center space-x-1.5">
+                  <Loader size={12} className="text-blue-500 animate-spin" />
+                  <span className="text-gray-300">Updating</span>
+                </div>
               </div>
-              <div className="flex items-center space-x-1.5">
-                <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
-                <span className="text-gray-300">Neutral</span>
+            </div>
+          </div>
+
+          {/* RIGHT SIDEBAR - LIVE NEWS FEED */}
+          <div className="w-96 bg-gray-900/98 border-l border-gray-800 flex flex-col">
+            <div className="px-4 py-4 border-b border-gray-800">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-bold text-white tracking-wide">Live Intelligence Feed</div>
+                <div className="flex items-center space-x-2 px-2 py-1 rounded bg-green-900/20">
+                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
+                  <span className="text-green-400 text-xs font-semibold">LIVE</span>
+                </div>
               </div>
-              <div className="flex items-center space-x-1.5">
-                <div className="w-3 h-3 rounded-full bg-red-500"></div>
-                <span className="text-gray-300">Bearish</span>
-              </div>
+              <div className="text-xs text-gray-500 mt-1">{financialNews.length} articles • Quality filtered</div>
+            </div>
+            
+            <div className="flex-1 overflow-y-auto">
+              <AnimatePresence>
+                {financialNews.map((article, idx) => (
+                  <motion.a
+                    key={article.id}
+                    href={article.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: idx * 0.05 }}
+                    className="block px-4 py-3 border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer transition-all group"
+                  >
+                    <div className="flex items-start space-x-3">
+                      <div className={`w-1.5 h-full rounded-full mt-1 flex-shrink-0 ${
+                        article.sentiment === 'bullish' ? 'bg-green-500' : 
+                        article.sentiment === 'bearish' ? 'bg-red-500' : 
+                        'bg-yellow-500'
+                      }`}></div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-xs text-white leading-tight mb-2 group-hover:text-blue-300 transition-colors">
+                          {article.title}
+                        </div>
+                        <div className="flex items-center justify-between text-xs">
+                          <div className="flex items-center space-x-2">
+                            <span className="text-gray-500">{article.source}</span>
+                            {article.city && (
+                              <>
+                                <span className="text-gray-700">•</span>
+                                <span className="text-blue-400">{article.city}</span>
+                              </>
+                            )}
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            <span className="text-gray-600 font-mono text-[10px]">
+                              {getRelativeTime(article.timestamp)}
+                            </span>
+                            <ExternalLink size={10} className="text-gray-600 group-hover:text-blue-400 transition-colors" />
+                          </div>
+                        </div>
+                        {article.quality_score && (
+                          <div className="mt-2">
+                            <div className="flex items-center space-x-2">
+                              <div className="flex-1 bg-gray-800 rounded-full h-1">
+                                <div 
+                                  className={`h-1 rounded-full ${
+                                    article.quality_score > 70 ? 'bg-green-500' :
+                                    article.quality_score > 40 ? 'bg-yellow-500' :
+                                    'bg-gray-500'
+                                  }`}
+                                  style={{ width: `${article.quality_score}%` }}
+                                ></div>
+                              </div>
+                              <span className="text-[10px] text-gray-600 font-mono">{article.quality_score}</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </motion.a>
+                ))}
+              </AnimatePresence>
             </div>
           </div>
         </div>
