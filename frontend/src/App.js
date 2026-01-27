@@ -1,8 +1,13 @@
+import React from 'react';
 import WorldMap from './components/WorldMap';
-import './index.css';
+import './App.css';
 
 function App() {
-  return <WorldMap />;
+  return (
+    <div className="App">
+      <WorldMap />
+    </div>
+  );
 }
 
 export default App;
