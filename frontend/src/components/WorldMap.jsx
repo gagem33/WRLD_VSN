@@ -32,23 +32,35 @@ const WorldMap = () => {
 
   // Initialize map
   useEffect(() => {
-    if (map.current) return; // Initialize map only once
+    if (map.current || !mapContainer.current) return; // Initialize map only once and wait for container
     
     console.log('🗺️ Initializing Mapbox GL map...');
     
-    map.current = new mapboxgl.Map({
-      container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/dark-v11',
-      center: [0, 20],
-      zoom: 2,
-      pitch: 45,
-      projection: 'globe'
-    });
+    try {
+      map.current = new mapboxgl.Map({
+        container: mapContainer.current,
+        style: 'mapbox://styles/mapbox/dark-v11',
+        center: [0, 20],
+        zoom: 2,
+        pitch: 45,
+        projection: 'globe'
+      });
 
-    // Add navigation controls
-    map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
+      // Add navigation controls
+      map.current.addControl(new mapboxgl.NavigationControl(), 'top-right');
+      
+      console.log('✅ Map initialized successfully!');
+    } catch (error) {
+      console.error('❌ Map initialization error:', error);
+    }
     
-    console.log('✅ Map initialized successfully!');
+    // Cleanup
+    return () => {
+      if (map.current) {
+        map.current.remove();
+        map.current = null;
+      }
+    };
   }, []);
 
   // Fetch news
