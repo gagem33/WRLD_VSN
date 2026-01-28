@@ -1,13 +1,8 @@
 import React from 'react';
-import WorldMap from './components/WorldMap';
-import './App.css';
+import Terminal from './components/Terminal';
 
 function App() {
-  return (
-    <div className="App">
-      <WorldMap />
-    </div>
-  );
+  return <Terminal />;
 }
 
 export default App;
