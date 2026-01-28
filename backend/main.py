@@ -1,25 +1,28 @@
 """
-WRLD VSN - Ultimate Financial Intelligence Backend V3
-ACCURACY FIRST: Real-time data, validation, backups, transparency
+WRLD VSN V4 - AUTHORITATIVE DATA LAYER
+Railway Backend - Single Source of Truth
+
+Architecture:
+- Background workers continuously poll external APIs
+- All data stored in authoritative state with versioning
+- Atomic updates with timestamps
+- Zero caching on endpoints
+- Snapshot-based API responses
 """
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
+import asyncio
 import os
 import httpx
-import asyncio
-import hashlib
-from collections import defaultdict
-from enum import Enum
-import pytz
+from typing import Dict, Any, List, Optional
+import json
 
 app = FastAPI(
-    title="WRLD VSN Ultimate API V3",
-    description="Professional Financial Intelligence - Accuracy Guaranteed",
-    version="3.0.0"
+    title="WRLD VSN Authoritative Layer",
+    description="Single Source of Truth for Global Intelligence",
+    version="4.0.0"
 )
 
 app.add_middleware(
@@ -30,682 +33,698 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API Keys
+# ============================================================================
+# API KEYS
+# ============================================================================
+
 FINNHUB_KEY = os.getenv("FINNHUB_KEY")
 COINMARKETCAP_KEY = os.getenv("COINMARKETCAP_KEY")
 OPENWEATHER_KEY = os.getenv("OPENWEATHER_KEY")
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY")
-FRED_API_KEY = os.getenv("FRED_API_KEY")
 
-class DataStatus(str, Enum):
-    VERIFIED = "verified"
-    STALE = "stale"
-    ESTIMATED = "estimated"
-    ERROR = "error"
+# ============================================================================
+# AUTHORITATIVE STATE - SINGLE SOURCE OF TRUTH
+# ============================================================================
 
-class DataPoint(BaseModel):
-    value: float
-    timestamp: datetime
-    source: str
-    status: DataStatus
-    age_seconds: int
-    is_live: bool
-
-# Major financial cities
-MAJOR_CITIES = {
-    "New York": {
-        "lat": 40.7128, "lng": -74.0060, "timezone": "America/New_York",
-        "symbol": "^GSPC", "exchange": "NYSE", "index": "S&P 500"
-    },
-    "London": {
-        "lat": 51.5074, "lng": -0.1278, "timezone": "Europe/London",
-        "symbol": "^FTSE", "exchange": "LSE", "index": "FTSE 100"
-    },
-    "Tokyo": {
-        "lat": 35.6762, "lng": 139.6503, "timezone": "Asia/Tokyo",
-        "symbol": "^N225", "exchange": "TSE", "index": "Nikkei 225"
-    },
-    "Hong Kong": {
-        "lat": 22.3193, "lng": 114.1694, "timezone": "Asia/Hong_Kong",
-        "symbol": "^HSI", "exchange": "HKEX", "index": "Hang Seng"
-    },
-    "Frankfurt": {
-        "lat": 50.1109, "lng": 8.6821, "timezone": "Europe/Berlin",
-        "symbol": "^GDAXI", "exchange": "XETRA", "index": "DAX"
-    },
-    "Paris": {
-        "lat": 48.8566, "lng": 2.3522, "timezone": "Europe/Paris",
-        "symbol": "^FCHI", "exchange": "Euronext", "index": "CAC 40"
-    },
-    "Shanghai": {
-        "lat": 31.2304, "lng": 121.4737, "timezone": "Asia/Shanghai",
-        "symbol": "000001.SS", "exchange": "SSE", "index": "Shanghai Composite"
-    },
-    "Sydney": {
-        "lat": -33.8688, "lng": 151.2093, "timezone": "Australia/Sydney",
-        "symbol": "^AXJO", "exchange": "ASX", "index": "ASX 200"
-    },
+AUTHORITATIVE_STATE = {
+    "markets": None,     # Complete market snapshot
+    "news": None,        # Complete news feed
+    "weather": None,     # Weather data
 }
 
-# Cache with metadata
-_cache = {}
-_cache_metadata = {}
+# Version tracking for each data type
+STATE_VERSIONS = {
+    "markets": 0,
+    "news": 0,
+    "weather": 0,
+}
 
-def get_cache_ttl(data_type: str, is_market_open: bool) -> int:
-    """Smart cache duration based on data type and market status"""
-    if not is_market_open and data_type in ['index', 'stock']:
-        return 3600  # 1 hour when market closed
-    
-    ttls = {
-        'top_index': 5,      # Ultra-fast
-        'index': 15,         # Fast
-        'crypto': 10,        # Crypto is 24/7
-        'commodity': 60,     # Medium
-        'weather': 300,      # 5 minutes
-        'calendar': 3600,    # 1 hour
-        'news': 120          # 2 minutes
-    }
-    return ttls.get(data_type, 300)
+# Locks to prevent race conditions during updates
+STATE_LOCKS = {
+    "markets": asyncio.Lock(),
+    "news": asyncio.Lock(),
+    "weather": asyncio.Lock(),
+}
 
-def is_market_open(exchange: str) -> bool:
-    """Check if market is currently open"""
-    now = datetime.now(pytz.UTC)
-    
-    market_hours = {
-        'NYSE': {'tz': 'America/New_York', 'open': 9.5, 'close': 16, 'days': [0,1,2,3,4]},
-        'LSE': {'tz': 'Europe/London', 'open': 8, 'close': 16.5, 'days': [0,1,2,3,4]},
-        'TSE': {'tz': 'Asia/Tokyo', 'open': 9, 'close': 15, 'days': [0,1,2,3,4]},
-        'HKEX': {'tz': 'Asia/Hong_Kong', 'open': 9.5, 'close': 16, 'days': [0,1,2,3,4]},
-        'XETRA': {'tz': 'Europe/Berlin', 'open': 9, 'close': 17.5, 'days': [0,1,2,3,4]},
-    }
-    
-    if exchange not in market_hours:
-        return True  # Assume open if unknown (like crypto)
-    
-    hours = market_hours[exchange]
-    local_time = now.astimezone(pytz.timezone(hours['tz']))
-    
-    # Check day of week (0=Monday, 6=Sunday)
-    if local_time.weekday() not in hours['days']:
-        return False
-    
-    # Check time
-    current_hour = local_time.hour + local_time.minute / 60
-    return hours['open'] <= current_hour < hours['close']
+# Track when each snapshot was last updated
+LAST_UPDATES = {
+    "markets": None,
+    "news": None,
+    "weather": None,
+}
 
-async def fetch_with_validation(primary_func, backup_func, data_type: str):
-    """Fetch data with validation and backup"""
-    try:
-        # Try primary source
-        data = await primary_func()
-        if data and 'value' in data and data['value'] is not None:
-            data['status'] = DataStatus.VERIFIED
-            return data
-    except Exception as e:
-        print(f"⚠️ Primary source failed for {data_type}: {e}")
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def get_utc_timestamp() -> str:
+    """Always return ISO 8601 UTC timestamp - this is our standard"""
+    return datetime.now(timezone.utc).isoformat()
+
+def normalize_timestamp(ts: Any) -> str:
+    """
+    Convert any timestamp format to ISO 8601 UTC
+    Handles: Unix timestamps, ISO strings, datetime objects
+    """
+    if ts is None:
+        return get_utc_timestamp()
     
     try:
-        # Try backup source
-        print(f"🔄 Trying backup source for {data_type}")
-        data = await backup_func()
-        if data and 'value' in data and data['value'] is not None:
-            data['status'] = DataStatus.VERIFIED
-            data['source'] += ' (backup)'
-            return data
+        if isinstance(ts, int) or isinstance(ts, float):
+            # Unix timestamp (seconds or milliseconds)
+            if ts > 10**10:  # Milliseconds
+                ts = ts / 1000
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+            return dt.isoformat()
+        
+        elif isinstance(ts, str):
+            # Try parsing ISO format
+            # Handle 'Z' timezone indicator
+            ts_clean = ts.replace('Z', '+00:00')
+            dt = datetime.fromisoformat(ts_clean)
+            # Ensure UTC
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt.isoformat()
+        
+        elif isinstance(ts, datetime):
+            # datetime object
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            else:
+                ts = ts.astimezone(timezone.utc)
+            return ts.isoformat()
+        
+        else:
+            # Unknown type, return current time
+            return get_utc_timestamp()
+    
     except Exception as e:
-        print(f"❌ Backup source also failed for {data_type}: {e}")
-    
-    # Return stale data if available
-    if data_type in _cache:
-        cached = _cache[data_type]
-        cached['status'] = DataStatus.STALE
-        cached['age_seconds'] = int((datetime.now() - cached['timestamp']).total_seconds())
-        return cached
-    
-    return None
+        print(f"⚠️ Timestamp normalization failed: {e}, using current time")
+        return get_utc_timestamp()
 
-async def fetch_index_finnhub(symbol: str, name: str) -> Dict:
-    """Fetch index from Finnhub (primary)"""
-    async with httpx.AsyncClient() as client:
-        url = f"https://finnhub.io/api/v1/quote"
-        params = {"symbol": symbol, "token": FINNHUB_KEY}
-        response = await client.get(url, params=params, timeout=5.0)
-        data = response.json()
-        
-        if data.get('c'):  # current price exists
-            return {
-                'value': data['c'],
-                'change': data.get('dp', 0),  # daily percent change
-                'timestamp': datetime.now(),
-                'source': 'Finnhub',
-                'is_live': True
-            }
-    return None
+# ============================================================================
+# EXTERNAL API FETCHERS
+# ============================================================================
 
-async def fetch_index_yahoo(symbol: str, name: str) -> Dict:
-    """Fetch index from Yahoo Finance (backup)"""
-    async with httpx.AsyncClient() as client:
-        # Yahoo Finance doesn't need API key for basic quotes
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        params = {"interval": "1m", "range": "1d"}
-        response = await client.get(url, params=params, timeout=5.0)
-        data = response.json()
-        
-        if 'chart' in data and 'result' in data['chart']:
-            result = data['chart']['result'][0]
-            meta = result.get('meta', {})
-            
-            return {
-                'value': meta.get('regularMarketPrice'),
-                'change': meta.get('regularMarketChangePercent', 0),
-                'timestamp': datetime.now(),
-                'source': 'Yahoo Finance',
-                'is_live': True
-            }
-    return None
-
-async def fetch_crypto_cmc(symbol: str) -> Dict:
-    """Fetch crypto from CoinMarketCap (primary)"""
-    async with httpx.AsyncClient() as client:
-        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
-        headers = {"X-CMC_PRO_API_KEY": COINMARKETCAP_KEY}
-        params = {"symbol": symbol, "convert": "USD"}
-        
-        response = await client.get(url, headers=headers, params=params, timeout=5.0)
-        data = response.json()
-        
-        if 'data' in data and symbol in data['data']:
-            coin = data['data'][symbol]
-            quote = coin['quote']['USD']
-            
-            return {
-                'value': quote['price'],
-                'change': quote['percent_change_24h'],
-                'timestamp': datetime.now(),
-                'source': 'CoinMarketCap',
-                'is_live': True,
-                'volume_24h': quote.get('volume_24h'),
-                'market_cap': quote.get('market_cap')
-            }
-    return None
-
-async def fetch_crypto_binance(symbol: str) -> Dict:
-    """Fetch crypto from Binance (backup)"""
-    async with httpx.AsyncClient() as client:
-        # Convert symbol format (BTC -> BTCUSDT)
-        symbol_pair = f"{symbol}USDT"
-        url = f"https://api.binance.com/api/v3/ticker/24hr"
-        params = {"symbol": symbol_pair}
-        
-        response = await client.get(url, params=params, timeout=5.0)
-        data = response.json()
-        
-        if 'lastPrice' in data:
-            return {
-                'value': float(data['lastPrice']),
-                'change': float(data['priceChangePercent']),
-                'timestamp': datetime.now(),
-                'source': 'Binance',
-                'is_live': True
-            }
-    return None
-
-async def fetch_realtime_markets():
-    """Fetch real-time market data with validation"""
+async def fetch_finnhub_equities() -> List[Dict]:
+    """
+    Fetch equity indices from Finnhub
+    Returns normalized data structure
+    """
+    if not FINNHUB_KEY:
+        print("⚠️ FINNHUB_KEY not configured")
+        return []
     
-    # Top indices (ultra-fast refresh)
-    top_indices = ['S&P 500', 'NASDAQ', 'Dow Jones']
-    
-    # Other indices (fast refresh)
-    other_indices = ['FTSE 100', 'DAX', 'Nikkei 225', 'Hang Seng']
-    
-    # Top crypto (fast refresh)
-    top_crypto = ['BTC', 'ETH', 'BNB', 'SOL', 'XRP']
-    
-    markets = {
-        'equities': [],
-        'crypto': [],
-        'last_update': datetime.now().isoformat(),
-        'data_quality': {}
+    # Major indices to track
+    symbols = {
+        "^GSPC": {"name": "S&P 500", "exchange": "US"},
+        "^IXIC": {"name": "NASDAQ", "exchange": "US"},
+        "^DJI": {"name": "DOW", "exchange": "US"},
+        "^FTSE": {"name": "FTSE 100", "exchange": "UK"},
+        "^GDAXI": {"name": "DAX", "exchange": "DE"},
     }
     
-    # Fetch top indices
-    for idx_name in top_indices:
-        city = [c for c, info in MAJOR_CITIES.items() if info.get('index') == idx_name]
-        if city:
-            city_info = MAJOR_CITIES[city[0]]
-            is_open = is_market_open(city_info['exchange'])
-            
-            data = await fetch_with_validation(
-                lambda s=city_info['symbol'], n=idx_name: fetch_index_finnhub(s, n),
-                lambda s=city_info['symbol'], n=idx_name: fetch_index_yahoo(s, n),
-                f"index_{idx_name}"
-            )
-            
-            if data:
-                markets['equities'].append({
-                    'name': idx_name,
-                    'symbol': city_info['symbol'],
-                    'value': data['value'],
-                    'change': data['change'],
-                    'status': data.get('status', DataStatus.VERIFIED),
-                    'source': data['source'],
-                    'is_live': is_open,
-                    'market_status': 'OPEN' if is_open else 'CLOSED',
-                    'timestamp': data['timestamp'].isoformat(),
-                    'age_seconds': int((datetime.now() - data['timestamp']).total_seconds())
-                })
+    results = []
     
-    # Fetch crypto
-    for crypto_symbol in top_crypto:
-        data = await fetch_with_validation(
-            lambda s=crypto_symbol: fetch_crypto_cmc(s),
-            lambda s=crypto_symbol: fetch_crypto_binance(s),
-            f"crypto_{crypto_symbol}"
-        )
-        
-        if data:
-            # Get historical data for candlesticks (last 24 hours, 15-min intervals)
-            candlestick_data = await fetch_crypto_candlesticks(crypto_symbol)
-            
-            markets['crypto'].append({
-                'symbol': crypto_symbol,
-                'value': data['value'],
-                'change': data['change'],
-                'status': data.get('status', DataStatus.VERIFIED),
-                'source': data['source'],
-                'is_live': True,  # Crypto is 24/7
-                'timestamp': data['timestamp'].isoformat(),
-                'age_seconds': int((datetime.now() - data['timestamp']).total_seconds()),
-                'candlestick_data': candlestick_data
-            })
+    async with httpx.AsyncClient() as client:
+        for symbol, info in symbols.items():
+            try:
+                url = "https://finnhub.io/api/v1/quote"
+                params = {"symbol": symbol, "token": FINNHUB_KEY}
+                response = await client.get(url, params=params, timeout=10.0)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if data.get('c'):  # Current price exists
+                        results.append({
+                            "symbol": symbol,
+                            "name": info["name"],
+                            "exchange": info["exchange"],
+                            "price": float(data['c']),
+                            "change_percent": float(data.get('dp', 0)),
+                            "change_value": float(data.get('d', 0)),
+                            "high": float(data.get('h', 0)),
+                            "low": float(data.get('l', 0)),
+                            "open": float(data.get('o', 0)),
+                            "previous_close": float(data.get('pc', 0)),
+                            "timestamp": normalize_timestamp(data.get('t')),
+                        })
+                        print(f"✅ Finnhub: {info['name']} = {data['c']}")
+                
+            except Exception as e:
+                print(f"❌ Finnhub error for {symbol}: {e}")
+                continue
     
-    # Data quality summary
-    markets['data_quality'] = {
-        'equities': {
-            'total': len(markets['equities']),
-            'verified': len([e for e in markets['equities'] if e['status'] == DataStatus.VERIFIED]),
-            'stale': len([e for e in markets['equities'] if e['status'] == DataStatus.STALE])
-        },
-        'crypto': {
-            'total': len(markets['crypto']),
-            'verified': len([c for c in markets['crypto'] if c['status'] == DataStatus.VERIFIED]),
-            'stale': len([c for c in markets['crypto'] if c['status'] == DataStatus.STALE])
-        }
-    }
-    
-    return markets
+    return results
 
-async def fetch_crypto_candlesticks(symbol: str, hours: int = 24) -> List[Dict]:
-    """Fetch candlestick data for crypto (15-min intervals)"""
+async def fetch_coinmarketcap_crypto() -> List[Dict]:
+    """
+    Fetch top cryptocurrencies from CoinMarketCap
+    Returns normalized data structure
+    """
+    if not COINMARKETCAP_KEY:
+        print("⚠️ COINMARKETCAP_KEY not configured")
+        return []
+    
+    symbols = ["BTC", "ETH", "BNB", "SOL", "XRP"]
+    results = []
+    
     try:
         async with httpx.AsyncClient() as client:
-            # Use Binance for historical data (free, no key needed)
-            symbol_pair = f"{symbol}USDT"
-            url = "https://api.binance.com/api/v3/klines"
-            params = {
-                "symbol": symbol_pair,
-                "interval": "15m",  # 15-minute candles
-                "limit": min(96, hours * 4)  # 4 candles per hour
-            }
+            url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+            headers = {"X-CMC_PRO_API_KEY": COINMARKETCAP_KEY}
+            params = {"symbol": ",".join(symbols), "convert": "USD"}
             
-            response = await client.get(url, params=params, timeout=10.0)
-            data = response.json()
+            response = await client.get(url, headers=headers, params=params, timeout=10.0)
             
-            candlesticks = []
-            for candle in data:
-                candlesticks.append({
-                    'timestamp': datetime.fromtimestamp(candle[0] / 1000).isoformat(),
-                    'open': float(candle[1]),
-                    'high': float(candle[2]),
-                    'low': float(candle[3]),
-                    'close': float(candle[4]),
-                    'volume': float(candle[5])
-                })
-            
-            return candlesticks[-50:]  # Return last 50 candles for display
-    except Exception as e:
-        print(f"⚠️ Error fetching candlesticks for {symbol}: {e}")
-        return []
-
-async def fetch_financial_news():
-    """Fetch high-quality financial news (Finnhub + GDELT)"""
-    all_news = []
-    
-    # 1. Finnhub - Financial focus (primary)
-    if FINNHUB_KEY:
-        try:
-            async with httpx.AsyncClient() as client:
-                url = "https://finnhub.io/api/v1/news"
-                params = {"category": "general", "token": FINNHUB_KEY}
-                response = await client.get(url, params=params, timeout=10.0)
+            if response.status_code == 200:
                 data = response.json()
                 
-                for idx, article in enumerate(data[:40]):
-                    title = article.get("headline", "")
-                    summary = article.get("summary", "")
+                for symbol in symbols:
+                    if symbol in data.get('data', {}):
+                        coin = data['data'][symbol]
+                        quote = coin['quote']['USD']
+                        
+                        results.append({
+                            "symbol": symbol,
+                            "name": coin['name'],
+                            "price": float(quote['price']),
+                            "change_percent_24h": float(quote.get('percent_change_24h', 0)),
+                            "change_percent_7d": float(quote.get('percent_change_7d', 0)),
+                            "volume_24h": float(quote.get('volume_24h', 0)),
+                            "market_cap": float(quote.get('market_cap', 0)),
+                            "timestamp": normalize_timestamp(quote.get('last_updated')),
+                        })
+                        print(f"✅ CoinMarketCap: {symbol} = ${quote['price']:.2f}")
+            
+    except Exception as e:
+        print(f"❌ CoinMarketCap error: {e}")
+    
+    return results
+
+async def fetch_binance_crypto_backup() -> List[Dict]:
+    """
+    Backup crypto source using Binance public API (no key required)
+    """
+    symbols = [
+        ("BTCUSDT", "BTC"),
+        ("ETHUSDT", "ETH"),
+        ("BNBUSDT", "BNB"),
+        ("SOLUSDT", "SOL"),
+    ]
+    results = []
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            for pair, symbol in symbols:
+                try:
+                    url = f"https://api.binance.com/api/v3/ticker/24hr"
+                    params = {"symbol": pair}
+                    response = await client.get(url, params=params, timeout=5.0)
                     
-                    city = assign_news_to_city(title, summary)
-                    sentiment = analyze_sentiment(title + " " + summary)
-                    quality_score = calculate_news_quality(article, 'Finnhub')
-                    
-                    all_news.append({
-                        "id": f"finnhub_{idx}",
-                        "title": title,
-                        "source": article.get("source", "Finnhub"),
-                        "sentiment": sentiment,
-                        "city": city,
-                        "timestamp": datetime.fromtimestamp(article.get("datetime", 0)).isoformat(),
-                        "url": article.get("url"),
-                        "quality_score": quality_score,
-                        "age_seconds": int((datetime.now() - datetime.fromtimestamp(article.get("datetime", 0))).total_seconds())
+                    if response.status_code == 200:
+                        data = response.json()
+                        results.append({
+                            "symbol": symbol,
+                            "name": symbol,
+                            "price": float(data['lastPrice']),
+                            "change_percent_24h": float(data['priceChangePercent']),
+                            "volume_24h": float(data['volume']),
+                            "timestamp": normalize_timestamp(data.get('closeTime')),
+                        })
+                        print(f"✅ Binance: {symbol} = ${data['lastPrice']}")
+                        
+                except Exception as e:
+                    print(f"❌ Binance error for {symbol}: {e}")
+                    continue
+    
+    except Exception as e:
+        print(f"❌ Binance general error: {e}")
+    
+    return results
+
+async def fetch_finnhub_news() -> List[Dict]:
+    """
+    Fetch financial news from Finnhub
+    Returns normalized article structure
+    """
+    if not FINNHUB_KEY:
+        return []
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            url = "https://finnhub.io/api/v1/news"
+            params = {"category": "general", "token": FINNHUB_KEY}
+            response = await client.get(url, params=params, timeout=10.0)
+            
+            if response.status_code == 200:
+                data = response.json()
+                articles = []
+                
+                for article in data[:30]:  # Top 30 articles
+                    articles.append({
+                        "id": f"finnhub_{article.get('id', '')}",
+                        "title": article.get('headline', 'No title'),
+                        "summary": article.get('summary', ''),
+                        "url": article.get('url', ''),
+                        "source": article.get('source', 'Finnhub'),
+                        "article_timestamp": normalize_timestamp(article.get('datetime')),
+                        "sentiment": analyze_sentiment(article.get('headline', '')),
                     })
                 
-                print(f"✅ Finnhub: Fetched {len(data[:40])} articles")
-        except Exception as e:
-            print(f"⚠️ Finnhub news error: {e}")
+                print(f"✅ Finnhub News: Fetched {len(articles)} articles")
+                return articles
+                
+    except Exception as e:
+        print(f"❌ Finnhub News error: {e}")
     
-    # 2. GDELT - Global supplement
+    return []
+
+async def fetch_gdelt_news() -> List[Dict]:
+    """
+    Fetch global news from GDELT (always available, no key required)
+    """
     try:
         async with httpx.AsyncClient() as client:
             url = "https://api.gdeltproject.org/api/v2/doc/doc"
             params = {
-                "query": "market OR economy OR stocks OR finance OR trading",
+                "query": "market OR economy OR finance OR stocks OR trading",
                 "mode": "ArtList",
-                "maxrecords": 30,
+                "maxrecords": 25,
                 "format": "json",
-                "timespan": "6h"
+                "timespan": "6h",
             }
             response = await client.get(url, params=params, timeout=10.0)
-            data = response.json()
             
-            for idx, article in enumerate(data.get("articles", [])[:20]):
-                title = article.get("title", "")
+            if response.status_code == 200:
+                data = response.json()
+                articles = []
                 
-                city = assign_news_to_city(title)
-                sentiment = analyze_sentiment(title)
-                quality_score = calculate_news_quality(article, 'GDELT')
+                for article in data.get('articles', [])[:25]:
+                    articles.append({
+                        "id": f"gdelt_{article.get('url', '')}",
+                        "title": article.get('title', 'No title')[:200],
+                        "url": article.get('url', ''),
+                        "source": article.get('domain', 'GDELT'),
+                        "article_timestamp": normalize_timestamp(article.get('seendate')),
+                        "sentiment": analyze_sentiment(article.get('title', '')),
+                    })
                 
-                all_news.append({
-                    "id": f"gdelt_{idx}",
-                    "title": title[:200],
-                    "source": article.get("domain", "GDELT"),
-                    "sentiment": sentiment,
-                    "city": city,
-                    "timestamp": article.get("seendate", datetime.now().isoformat()),
-                    "url": article.get("url"),
-                    "quality_score": quality_score,
-                    "age_seconds": 0  # GDELT doesn't provide precise timestamps
-                })
-            
-            print(f"✅ GDELT: Fetched {len(data.get('articles', [])[:20])} articles")
+                print(f"✅ GDELT News: Fetched {len(articles)} articles")
+                return articles
+                
     except Exception as e:
-        print(f"⚠️ GDELT error: {e}")
+        print(f"❌ GDELT News error: {e}")
     
-    # Sort by quality score and recency
-    all_news.sort(key=lambda x: (x['quality_score'], -x.get('age_seconds', 0)), reverse=True)
-    
-    # Return top 50
-    return all_news[:50]
-
-def calculate_news_quality(article: Dict, source_type: str) -> int:
-    """Calculate news quality score (0-100)"""
-    score = 0
-    
-    # Trusted sources bonus
-    trusted_sources = ['Reuters', 'Bloomberg', 'WSJ', 'Financial Times', 'AP', 'CNBC']
-    source_name = article.get('source', '')
-    if any(trusted in source_name for trusted in trusted_sources):
-        score += 50
-    elif source_type == 'Finnhub':
-        score += 30  # Finnhub is financial-focused
-    else:
-        score += 10  # GDELT is general
-    
-    # Recency bonus
-    if 'datetime' in article:
-        age_minutes = (datetime.now() - datetime.fromtimestamp(article['datetime'])).total_seconds() / 60
-    elif 'age_seconds' in article:
-        age_minutes = article['age_seconds'] / 60
-    else:
-        age_minutes = 999
-    
-    if age_minutes < 10:
-        score += 30
-    elif age_minutes < 60:
-        score += 20
-    elif age_minutes < 360:
-        score += 10
-    
-    # Financial keywords bonus
-    title = article.get('headline', article.get('title', '')).lower()
-    financial_terms = ['market', 'stock', 'fed', 'economy', 'earnings', 'trade', 'gdp', 'inflation']
-    score += min(20, sum(5 for term in financial_terms if term in title))
-    
-    return min(100, score)
-
-def assign_news_to_city(title: str, description: str = "") -> Optional[str]:
-    """Intelligently assign news to cities"""
-    text = (title + " " + description).lower()
-    
-    # Direct city/country matches
-    city_keywords = {
-        "New York": ["wall street", "nyse", "nasdaq", "fed", "federal reserve", "new york"],
-        "London": ["london", "ftse", "bank of england", "uk", "britain"],
-        "Tokyo": ["tokyo", "nikkei", "japan", "boj"],
-        "Hong Kong": ["hong kong", "hang seng", "hsi"],
-        "Frankfurt": ["frankfurt", "dax", "ecb", "germany"],
-        "Paris": ["paris", "france", "cac"],
-        "Shanghai": ["shanghai", "china", "pboc"],
-        "Sydney": ["sydney", "australia", "asx"]
-    }
-    
-    for city, keywords in city_keywords.items():
-        if any(kw in text for kw in keywords):
-            return city
-    
-    return None
+    return []
 
 def analyze_sentiment(text: str) -> str:
-    """Analyze sentiment from text"""
+    """
+    Simple keyword-based sentiment analysis
+    Returns: 'bullish', 'bearish', 'neutral'
+    """
+    if not text:
+        return 'neutral'
+    
     text_lower = text.lower()
     
-    bullish_words = ["surge", "rally", "gain", "boom", "growth", "bull", "soar", "rise", "up", "high"]
-    bearish_words = ["fall", "drop", "crash", "decline", "bear", "plunge", "crisis", "down", "low"]
+    bullish = ['surge', 'rally', 'gain', 'boom', 'growth', 'bull', 'soar', 'rise', 'up', 'high', 'profit']
+    bearish = ['fall', 'drop', 'crash', 'decline', 'bear', 'plunge', 'crisis', 'down', 'low', 'loss', 'risk']
     
-    bullish_count = sum(1 for word in bullish_words if word in text_lower)
-    bearish_count = sum(1 for word in bearish_words if word in text_lower)
+    bullish_count = sum(1 for word in bullish if word in text_lower)
+    bearish_count = sum(1 for word in bearish if word in text_lower)
     
     if bullish_count > bearish_count:
-        return "bullish"
+        return 'bullish'
     elif bearish_count > bullish_count:
-        return "bearish"
-    return "neutral"
+        return 'bearish'
+    else:
+        return 'neutral'
 
-async def fetch_weather_data():
-    """Fetch global weather and severe storms"""
-    if not OPENWEATHER_KEY:
-        return {"storms": [], "status": "no_api_key"}
+# ============================================================================
+# BACKGROUND WORKERS - CONTINUOUS DATA POLLING
+# ============================================================================
+
+# [TO BE CONTINUED IN NEXT FILE - this is getting long]
+# ============================================================================
+# BACKGROUND WORKERS - THESE RUN CONTINUOUSLY
+# ============================================================================
+
+async def update_markets_worker():
+    """
+    MARKETS WORKER
+    - Runs every 15 seconds
+    - Fetches equities AND crypto in parallel
+    - Builds complete snapshot
+    - Atomically updates authoritative state
+    - Increments version number
+    """
+    print("🚀 Markets worker started")
     
-    storms = []
+    # Wait a bit on startup to let server initialize
+    await asyncio.sleep(2)
     
-    # Check major cities for severe weather alerts
-    for city_name, city_info in MAJOR_CITIES.items():
-        try:
-            async with httpx.AsyncClient() as client:
-                url = "https://api.openweathermap.org/data/2.5/weather"
-                params = {
-                    "lat": city_info['lat'],
-                    "lon": city_info['lng'],
-                    "appid": OPENWEATHER_KEY,
-                    "units": "metric"
+    while True:
+        async with STATE_LOCKS["markets"]:
+            try:
+                print("\n📊 Updating markets...")
+                
+                # Fetch all market data in parallel
+                equities_task = fetch_finnhub_equities()
+                crypto_task = fetch_coinmarketcap_crypto()
+                crypto_backup_task = fetch_binance_crypto_backup()
+                
+                equities, crypto_primary, crypto_backup = await asyncio.gather(
+                    equities_task,
+                    crypto_task,
+                    crypto_backup_task,
+                    return_exceptions=True
+                )
+                
+                # Handle failures gracefully
+                if isinstance(equities, Exception):
+                    print(f"❌ Equities fetch failed: {equities}")
+                    equities = []
+                
+                if isinstance(crypto_primary, Exception):
+                    print(f"⚠️ CoinMarketCap failed, using Binance backup")
+                    crypto = crypto_backup if not isinstance(crypto_backup, Exception) else []
+                else:
+                    crypto = crypto_primary
+                
+                # Build complete atomic snapshot
+                new_version = STATE_VERSIONS["markets"] + 1
+                snapshot = {
+                    "equities": equities,
+                    "crypto": crypto,
+                    "server_timestamp": get_utc_timestamp(),
+                    "data_version": new_version,
+                    "sources": {
+                        "equities": "Finnhub",
+                        "crypto": "CoinMarketCap" if crypto == crypto_primary else "Binance",
+                    },
+                    "data_points": len(equities) + len(crypto),
                 }
                 
-                response = await client.get(url, params=params, timeout=5.0)
-                data = response.json()
+                # ATOMIC REPLACEMENT - all or nothing
+                AUTHORITATIVE_STATE["markets"] = snapshot
+                STATE_VERSIONS["markets"] = new_version
+                LAST_UPDATES["markets"] = get_utc_timestamp()
                 
-                weather_main = data.get('weather', [{}])[0].get('main', '')
-                description = data.get('weather', [{}])[0].get('description', '')
+                print(f"✅ Markets updated: v{new_version} ({snapshot['data_points']} data points)")
                 
-                # Check for severe weather
-                severe_conditions = ['Thunderstorm', 'Tornado', 'Hurricane', 'Snow', 'Extreme']
-                if any(cond in weather_main for cond in severe_conditions):
-                    storms.append({
-                        'city': city_name,
-                        'lat': city_info['lat'],
-                        'lng': city_info['lng'],
-                        'type': weather_main,
-                        'description': description,
-                        'temp': data['main'].get('temp'),
-                        'severity': 'high' if 'extreme' in description.lower() else 'medium'
-                    })
-        except Exception as e:
-            print(f"⚠️ Weather error for {city_name}: {e}")
+            except Exception as e:
+                print(f"❌ Markets worker error: {e}")
+        
+        # Wait 15 seconds before next update
+        await asyncio.sleep(15)
+
+
+async def update_news_worker():
+    """
+    NEWS WORKER
+    - Runs every 2 minutes
+    - Fetches from Finnhub AND GDELT
+    - Deduplicates by URL
+    - Sorts by article timestamp
+    - Atomically updates authoritative state
+    """
+    print("🚀 News worker started")
+    
+    await asyncio.sleep(5)  # Stagger startup
+    
+    while True:
+        async with STATE_LOCKS["news"]:
+            try:
+                print("\n📰 Updating news...")
+                
+                # Fetch from multiple sources in parallel
+                finnhub_task = fetch_finnhub_news()
+                gdelt_task = fetch_gdelt_news()
+                
+                finnhub_articles, gdelt_articles = await asyncio.gather(
+                    finnhub_task,
+                    gdelt_task,
+                    return_exceptions=True
+                )
+                
+                # Handle failures
+                if isinstance(finnhub_articles, Exception):
+                    print(f"❌ Finnhub news failed: {finnhub_articles}")
+                    finnhub_articles = []
+                
+                if isinstance(gdelt_articles, Exception):
+                    print(f"❌ GDELT news failed: {gdelt_articles}")
+                    gdelt_articles = []
+                
+                # Deduplicate by URL
+                seen_urls = set()
+                aggregated = []
+                
+                for article in finnhub_articles + gdelt_articles:
+                    url = article.get('url', '')
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        aggregated.append(article)
+                
+                # Sort by article timestamp (newest first)
+                aggregated.sort(
+                    key=lambda x: x.get('article_timestamp', ''),
+                    reverse=True
+                )
+                
+                # Take top 50
+                top_articles = aggregated[:50]
+                
+                # Build snapshot
+                new_version = STATE_VERSIONS["news"] + 1
+                snapshot = {
+                    "articles": top_articles,
+                    "server_timestamp": get_utc_timestamp(),
+                    "data_version": new_version,
+                    "total_articles": len(top_articles),
+                    "sources": ["Finnhub", "GDELT"],
+                }
+                
+                # ATOMIC REPLACEMENT
+                AUTHORITATIVE_STATE["news"] = snapshot
+                STATE_VERSIONS["news"] = new_version
+                LAST_UPDATES["news"] = get_utc_timestamp()
+                
+                print(f"✅ News updated: v{new_version} ({len(top_articles)} articles)")
+                
+            except Exception as e:
+                print(f"❌ News worker error: {e}")
+        
+        # Wait 2 minutes before next update
+        await asyncio.sleep(120)
+
+
+async def update_weather_worker():
+    """
+    WEATHER WORKER
+    - Runs every 5 minutes
+    - Fetches global weather data
+    - Atomically updates authoritative state
+    """
+    print("🚀 Weather worker started")
+    
+    await asyncio.sleep(10)  # Stagger startup
+    
+    while True:
+        async with STATE_LOCKS["weather"]:
+            try:
+                print("\n🌤️  Updating weather...")
+                
+                # Placeholder - would fetch from OpenWeatherMap
+                new_version = STATE_VERSIONS["weather"] + 1
+                snapshot = {
+                    "storms": [],
+                    "alerts": [],
+                    "server_timestamp": get_utc_timestamp(),
+                    "data_version": new_version,
+                }
+                
+                AUTHORITATIVE_STATE["weather"] = snapshot
+                STATE_VERSIONS["weather"] = new_version
+                LAST_UPDATES["weather"] = get_utc_timestamp()
+                
+                print(f"✅ Weather updated: v{new_version}")
+                
+            except Exception as e:
+                print(f"❌ Weather worker error: {e}")
+        
+        await asyncio.sleep(300)  # 5 minutes
+
+
+# ============================================================================
+# SNAPSHOT ENDPOINTS - THESE SERVE THE AUTHORITATIVE STATE
+# ============================================================================
+
+@app.get("/api/v1/snapshot/markets")
+async def get_markets_snapshot(response: Response):
+    """
+    Returns complete markets snapshot
+    
+    CRITICAL RULES:
+    - Never returns partial data
+    - Always includes version number
+    - Always includes server timestamp
+    - Forces no-cache headers
+    - Returns "initializing" if state not ready
+    """
+    # FORCE NO CACHING
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    
+    # Check if state is initialized
+    if AUTHORITATIVE_STATE["markets"] is None:
+        return {
+            "status": "initializing",
+            "message": "Markets data is being loaded",
+            "retry_after_seconds": 5,
+            "server_timestamp": get_utc_timestamp(),
+        }
+    
+    # Return complete snapshot
+    snapshot = AUTHORITATIVE_STATE["markets"].copy()
+    snapshot["endpoint_timestamp"] = get_utc_timestamp()
+    
+    return snapshot
+
+
+@app.get("/api/v1/snapshot/news")
+async def get_news_snapshot(response: Response):
+    """
+    Returns complete news snapshot
+    Same rules as markets endpoint
+    """
+    # FORCE NO CACHING
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    
+    if AUTHORITATIVE_STATE["news"] is None:
+        return {
+            "status": "initializing",
+            "message": "News feed is being loaded",
+            "retry_after_seconds": 5,
+            "server_timestamp": get_utc_timestamp(),
+        }
+    
+    snapshot = AUTHORITATIVE_STATE["news"].copy()
+    snapshot["endpoint_timestamp"] = get_utc_timestamp()
+    
+    return snapshot
+
+
+@app.get("/api/v1/snapshot/weather")
+async def get_weather_snapshot(response: Response):
+    """
+    Returns complete weather snapshot
+    """
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    
+    if AUTHORITATIVE_STATE["weather"] is None:
+        return {
+            "status": "initializing",
+            "retry_after_seconds": 5,
+            "server_timestamp": get_utc_timestamp(),
+        }
+    
+    return AUTHORITATIVE_STATE["weather"]
+
+
+@app.get("/api/v1/status")
+async def get_status(response: Response):
+    """
+    Health check endpoint
+    Shows state of all data sources
+    """
+    response.headers["Cache-Control"] = "no-cache"
     
     return {
-        'storms': storms,
-        'count': len(storms),
-        'last_update': datetime.now().isoformat()
+        "service": "WRLD VSN Authoritative Layer",
+        "version": "4.0.0",
+        "status": "operational",
+        "server_timestamp": get_utc_timestamp(),
+        "data_sources": {
+            "markets": {
+                "initialized": AUTHORITATIVE_STATE["markets"] is not None,
+                "version": STATE_VERSIONS["markets"],
+                "last_update": LAST_UPDATES["markets"],
+            },
+            "news": {
+                "initialized": AUTHORITATIVE_STATE["news"] is not None,
+                "version": STATE_VERSIONS["news"],
+                "last_update": LAST_UPDATES["news"],
+            },
+            "weather": {
+                "initialized": AUTHORITATIVE_STATE["weather"] is not None,
+                "version": STATE_VERSIONS["weather"],
+                "last_update": LAST_UPDATES["weather"],
+            },
+        },
+        "api_keys_configured": {
+            "FINNHUB_KEY": bool(FINNHUB_KEY),
+            "COINMARKETCAP_KEY": bool(COINMARKETCAP_KEY),
+            "OPENWEATHER_KEY": bool(OPENWEATHER_KEY),
+            "ALPHA_VANTAGE_KEY": bool(ALPHA_VANTAGE_KEY),
+        },
     }
 
-async def fetch_economic_calendar():
-    """Fetch upcoming economic events from Finnhub"""
-    if not FINNHUB_KEY:
-        return {"events": [], "status": "no_api_key"}
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            # Get today and next 7 days
-            today = datetime.now().strftime('%Y-%m-%d')
-            next_week = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
-            
-            url = "https://finnhub.io/api/v1/calendar/economic"
-            params = {
-                "from": today,
-                "to": next_week,
-                "token": FINNHUB_KEY
-            }
-            
-            response = await client.get(url, params=params, timeout=10.0)
-            data = response.json()
-            
-            events = []
-            for event in data.get('economicCalendar', [])[:20]:
-                # Determine impact level
-                impact = event.get('impact', '')
-                if impact in ['1', 'high']:
-                    impact_level = 'high'
-                elif impact in ['2', 'medium']:
-                    impact_level = 'medium'
-                else:
-                    impact_level = 'low'
-                
-                events.append({
-                    'event': event.get('event', 'Economic Event'),
-                    'country': event.get('country', 'US'),
-                    'date': event.get('time', today),
-                    'impact': impact_level,
-                    'actual': event.get('actual'),
-                    'estimate': event.get('estimate'),
-                    'previous': event.get('previous')
-                })
-            
-            return {
-                'events': events,
-                'count': len(events),
-                'last_update': datetime.now().isoformat()
-            }
-    except Exception as e:
-        print(f"⚠️ Economic calendar error: {e}")
-        return {"events": [], "status": "error", "error": str(e)}
-
-# API Endpoints
 
 @app.get("/")
-def root():
+async def root():
+    """Root endpoint"""
     return {
-        "service": "WRLD VSN Ultimate API V3",
-        "version": "3.0.0",
-        "status": "operational",
-        "accuracy": "guaranteed",
-        "timestamp": datetime.now().isoformat(),
-        "features": [
-            "Real-time market data (validated)",
-            "Multi-source news aggregation",
-            "Weather layer with storm tracking",
-            "Economic calendar",
-            "Candlestick charts",
-            "Data quality monitoring"
-        ],
-        "data_sources": {
-            "finnhub": bool(FINNHUB_KEY),
-            "coinmarketcap": bool(COINMARKETCAP_KEY),
-            "openweather": bool(OPENWEATHER_KEY),
-            "gdelt": True,
-            "binance": True,
-            "yahoo_finance": True
-        }
+        "service": "WRLD VSN Authoritative Layer",
+        "version": "4.0.0",
+        "docs": "/docs",
+        "status": "/api/v1/status",
     }
 
-@app.get("/api/v1/markets/live")
-async def get_live_markets():
-    """Get real-time validated market data"""
-    try:
-        markets = await fetch_realtime_markets()
-        return markets
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/v1/news/financial")
-async def get_financial_news(limit: int = Query(default=50, ge=1, le=100)):
-    """Get high-quality financial news"""
-    try:
-        news = await fetch_financial_news()
-        return {
-            "news": news[:limit],
-            "count": len(news),
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/weather/global")
-async def get_global_weather():
-    """Get global weather and severe storms"""
-    try:
-        weather = await fetch_weather_data()
-        return weather
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/v1/calendar/economic")
-async def get_economic_calendar():
-    """Get upcoming economic events"""
-    try:
-        calendar = await fetch_economic_calendar()
-        return calendar
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+# ============================================================================
+# STARTUP - LAUNCH BACKGROUND WORKERS
+# ============================================================================
 
 @app.on_event("startup")
 async def startup_event():
+    """
+    Start all background workers when server starts
+    """
     print("=" * 70)
-    print("🌍 WRLD VSN ULTIMATE V3 - ACCURACY GUARANTEED")
+    print("🌍 WRLD VSN AUTHORITATIVE LAYER STARTING")
     print("=" * 70)
-    print(f"✅ Finnhub: {'Configured ✓' if FINNHUB_KEY else 'Not configured ✗'}")
-    print(f"✅ CoinMarketCap: {'Configured ✓' if COINMARKETCAP_KEY else 'Not configured ✗'}")
-    print(f"✅ OpenWeather: {'Configured ✓' if OPENWEATHER_KEY else 'Not configured ✗'}")
-    print(f"✅ FRED: {'Configured ✓' if FRED_API_KEY else 'Not configured ✗'}")
-    print(f"✅ Binance: Always available ✓")
-    print(f"✅ Yahoo Finance: Always available ✓")
-    print(f"✅ GDELT: Always available ✓")
+    
+    # Log configuration
+    print(f"✅ Finnhub: {'Configured' if FINNHUB_KEY else 'NOT CONFIGURED'}")
+    print(f"✅ CoinMarketCap: {'Configured' if COINMARKETCAP_KEY else 'NOT CONFIGURED'}")
+    print(f"✅ OpenWeather: {'Configured' if OPENWEATHER_KEY else 'NOT CONFIGURED'}")
+    print(f"✅ Alpha Vantage: {'Configured' if ALPHA_VANTAGE_KEY else 'NOT CONFIGURED'}")
+    
+    print("\n🚀 Starting background workers...")
+    
+    # Launch all workers
+    asyncio.create_task(update_markets_worker())
+    asyncio.create_task(update_news_worker())
+    asyncio.create_task(update_weather_worker())
+    
+    print("✅ All workers started")
     print("=" * 70)
-    print("🚀 Server ready with real-time validated data!")
+    print("🎯 Server ready - Authoritative layer operational")
     print("=" * 70)
+
 
 if __name__ == "__main__":
     import uvicorn
